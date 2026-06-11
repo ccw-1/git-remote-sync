@@ -26,6 +26,10 @@ sudo cp git-remote-sync /usr/local/bin/  # Optional: install system-wide
 
 ## Configuration
 
+Configuration can be provided via a config file, command-line flags, or both (flags override file settings).
+
+### Option 1: Configuration File
+
 Create a file named `._remote_sync` in your git repository root (this file should NOT be committed to git):
 
 ```
@@ -52,7 +56,33 @@ Add to `.gitignore`:
 echo "._remote_sync" >> .gitignore
 ```
 
+### Option 2: Command-Line Flags
+
+You can provide configuration via command-line flags, which override the config file:
+
+```bash
+# Provide all configuration via command line (no config file needed)
+git-remote-sync -remote-path user@host:/path/to/repo -remote-setup ". ./.env"
+
+# Override only the remote path from config file
+git-remote-sync -remote-path user@host:/different/path
+
+# Override only the setup command
+git-remote-sync -remote-setup ". /custom/setup.sh"
+```
+
+### Option 3: Combination
+
+Use a config file for defaults and override specific settings with flags:
+
+```bash
+# Config file has remote-path, override setup command
+git-remote-sync -remote-setup ". /tmp/test-env"
+```
+
 ## Usage
+
+### Basic Usage
 
 From anywhere within your git repository:
 
@@ -61,19 +91,37 @@ git-remote-sync
 ```
 
 The utility will:
-1. Read the remote configuration from `._remote_sync`
+1. Read configuration from file and/or command-line flags
 2. Verify SSH connectivity
 3. Run remote-setup commands (if configured)
-4. Sync the .git directory
-5. Sync all tracked and untracked files
-6. Clean up files on remote that don't exist locally
+4. Sync all tracked and untracked files
+5. Clean up files on remote that don't exist locally
+6. Verify git status consistency
 7. Display a summary
 
-### Options
+### Command-Line Options
 
 ```bash
-git-remote-sync --help     # Show help
-git-remote-sync --version  # Show version
+git-remote-sync -h              # Show help
+git-remote-sync -v              # Show version
+git-remote-sync -remote-path string    # Remote path (user@host:/path)
+git-remote-sync -remote-setup string   # Remote setup command
+```
+
+### Usage Examples
+
+```bash
+# Use config file
+git-remote-sync
+
+# Provide all config via command line
+git-remote-sync -remote-path user@host:/path -remote-setup ". ./.env"
+
+# Override remote path from config file
+git-remote-sync -remote-path user@testhost:/test/path
+
+# Use config file but override setup command
+git-remote-sync -remote-setup ". /custom/env.sh"
 ```
 
 ## How It Works
