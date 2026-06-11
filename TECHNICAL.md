@@ -23,8 +23,14 @@ main()
 
 ## Configuration System
 
+### Configuration Sources
+Configuration can be provided via:
+1. **Config file** (default): `._remote_sync` in repository root (should be in `.gitignore`)
+2. **Command-line flags**: Override or replace config file settings
+3. **Combination**: Flags override file settings
+
 ### Configuration File Format
-Location: `._remote_sync` in repository root (must be in `.gitignore`)
+Location: `._remote_sync` in repository root (optional if using command-line flags)
 
 ```
 remote-path:userid@hostname:/path/to/remote/repo
@@ -35,12 +41,42 @@ remote-setup:. ./.env
 - `remote-path` (required): SSH connection string in format `user@host:/path`
 - `remote-setup` (optional): Shell command executed before each remote operation
 
+### Command-Line Flags
+```bash
+-remote-path string    Remote path in format user@host:/path (overrides config file)
+-remote-setup string   Remote setup command (overrides config file)
+-h, -help             Show help message
+-v, -version          Show version information
+```
+
+**Examples:**
+```bash
+# Use config file only
+git-remote-sync
+
+# Override remote path from config file
+git-remote-sync -remote-path user@host:/path/to/repo
+
+# Provide all config via command line (no config file needed)
+git-remote-sync -remote-path user@host:/path -remote-setup ". ./.env"
+
+# Override only setup command
+git-remote-sync -remote-setup ". /custom/setup.sh"
+```
+
 ### Configuration Parsing
-- Implemented in `readRemoteConfig()`
+- Implemented in `readRemoteConfig(path, cmdRemotePath, cmdRemoteSetup)`
+- Reads from file first (if exists)
+- Command-line flags override file settings
 - Supports comments (lines starting with `#`)
 - Ignores empty lines
 - Uses `strings.SplitN(line, ":", 2)` to parse key-value pairs
 - Validates required fields before returning
+
+**Priority Order:**
+1. Command-line flags (highest priority)
+2. Config file settings
+3. Error if neither provides required `remote-path`
 
 ## Remote Command Execution
 
@@ -448,14 +484,21 @@ ssh user@host 'cd /path && git init'
 
 ## Version History
 
-### v1.0.0 (Current)
+### v1.1.0 (Current)
+- Command-line flag support (`-remote-path`, `-remote-setup`)
+- Config file now optional (can use flags only)
+- Flags override config file settings
+- Enhanced help documentation with examples
+
+### v1.0.0
 - Initial release
 - Basic file synchronization
 - z/OS support with iconv
 - Checksum-based skip logic
 - Remote environment setup
+- Config file based configuration
 
-### Planned for v1.1.0
+### Planned for v1.2.0
 - Parallel transfers
 - Progress indicators
 - Dry run mode

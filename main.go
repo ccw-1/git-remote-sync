@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"bytes"
+	"flag"
 	"fmt"
 	"os"
 	"os/exec"
@@ -32,12 +33,20 @@ type SyncStats struct {
 }
 
 func main() {
-	if len(os.Args) > 1 && (os.Args[1] == "-h" || os.Args[1] == "--help") {
+	// Define command-line flags
+	remotePath := flag.String("remote-path", "", "Remote path in format user@host:/path (overrides config file)")
+	remoteSetup := flag.String("remote-setup", "", "Remote setup command (overrides config file)")
+	showHelp := flag.Bool("h", false, "Show help message")
+	showVersion := flag.Bool("v", false, "Show version information")
+	
+	flag.Parse()
+
+	if *showHelp {
 		printHelp()
 		return
 	}
 
-	if len(os.Args) > 1 && (os.Args[1] == "-v" || os.Args[1] == "--version") {
+	if *showVersion {
 		fmt.Printf("git-remote-sync version %s\n", version)
 		return
 	}
@@ -50,9 +59,9 @@ func main() {
 
 	fmt.Printf("Git repository root: %s\n", gitRoot)
 
-	// Read remote config
-	remotePath := filepath.Join(gitRoot, remoteSyncFile)
-	remote, err := readRemoteConfig(remotePath)
+	// Read remote config (from file or command-line args)
+	configPath := filepath.Join(gitRoot, remoteSyncFile)
+	remote, err := readRemoteConfig(configPath, *remotePath, *remoteSetup)
 	if err != nil {
 		fatal("Failed to read remote config: %v", err)
 	}
@@ -95,17 +104,31 @@ Usage: git-remote-sync [options]
 Syncs a local git repository with a remote one via SSH, maintaining the exact
 state including modified files, untracked files, and current branch.
 
-The remote location is read from a file named '%s' in the repository root.
-Format:
+Configuration can be provided via a file named '%s' in the repository root
+or via command-line flags (flags override file settings).
+
+Config file format:
   remote-path:userid@hostname:/path/to/remote/repo
   remote-setup:. ./.env
 
-The remote-setup line is optional and allows you to run environment setup
-commands before each remote operation (e.g., sourcing environment files).
-
 Options:
-  -h, --help     Show this help message
-  -v, --version  Show version information
+  -h, -help              Show this help message
+  -v, -version           Show version information
+  -remote-path string    Remote path in format user@host:/path (overrides config file)
+  -remote-setup string   Remote setup command (overrides config file)
+
+The remote-setup is optional and allows you to run environment setup commands
+before each remote operation (e.g., sourcing environment files).
+
+Examples:
+  # Use config file
+  git-remote-sync
+
+  # Override remote path
+  git-remote-sync -remote-path user@host:/path/to/repo
+
+  # Provide all config via command line
+  git-remote-sync -remote-path user@host:/path -remote-setup ". ./.env"
 
 The utility handles EBCDIC/ASCII conversion for z/OS systems automatically
 using iconv (codepage 1047 to 819).
@@ -121,58 +144,91 @@ func getGitRoot() (string, error) {
 	return strings.TrimSpace(string(output)), nil
 }
 
-func readRemoteConfig(path string) (*RemoteConfig, error) {
-	file, err := os.Open(path)
-	if err != nil {
-		return nil, fmt.Errorf("cannot open %s: %w (create this file with format: remote-path:user@host:/path and remote-setup:command)", remoteSyncFile, err)
-	}
-	defer file.Close()
-
+func readRemoteConfig(path string, cmdRemotePath string, cmdRemoteSetup string) (*RemoteConfig, error) {
 	config := &RemoteConfig{}
-	scanner := bufio.NewScanner(file)
 	
-	for scanner.Scan() {
-		line := strings.TrimSpace(scanner.Text())
-		if line == "" || strings.HasPrefix(line, "#") {
-			continue
-		}
-
-		parts := strings.SplitN(line, ":", 2)
-		if len(parts) != 2 {
-			continue
-		}
-
-		key := strings.TrimSpace(parts[0])
-		value := strings.TrimSpace(parts[1])
-
-		switch key {
-		case "remote-path":
-			// Parse user@host:/path
-			pathParts := strings.SplitN(value, ":", 2)
-			if len(pathParts) != 2 {
-				return nil, fmt.Errorf("invalid remote-path format, expected: user@host:/path")
+	// Try to read from file first (if it exists)
+	file, err := os.Open(path)
+	if err == nil {
+		defer file.Close()
+		scanner := bufio.NewScanner(file)
+		
+		for scanner.Scan() {
+			line := strings.TrimSpace(scanner.Text())
+			if line == "" || strings.HasPrefix(line, "#") {
+				continue
 			}
 
-			userHost := pathParts[0]
-			remotePath := pathParts[1]
-
-			userHostParts := strings.SplitN(userHost, "@", 2)
-			if len(userHostParts) != 2 {
-				return nil, fmt.Errorf("invalid remote-path format, expected: user@host:/path")
+			parts := strings.SplitN(line, ":", 2)
+			if len(parts) != 2 {
+				continue
 			}
 
-			config.User = userHostParts[0]
-			config.Host = userHostParts[1]
-			config.Path = remotePath
-			config.FullSpec = value
+			key := strings.TrimSpace(parts[0])
+			value := strings.TrimSpace(parts[1])
 
-		case "remote-setup":
-			config.Setup = value
+			switch key {
+			case "remote-path":
+				if cmdRemotePath == "" {
+					// Parse user@host:/path
+					pathParts := strings.SplitN(value, ":", 2)
+					if len(pathParts) != 2 {
+						return nil, fmt.Errorf("invalid remote-path format, expected: user@host:/path")
+					}
+
+					userHost := pathParts[0]
+					remotePath := pathParts[1]
+
+					userHostParts := strings.SplitN(userHost, "@", 2)
+					if len(userHostParts) != 2 {
+						return nil, fmt.Errorf("invalid remote-path format, expected: user@host:/path")
+					}
+
+					config.User = userHostParts[0]
+					config.Host = userHostParts[1]
+					config.Path = remotePath
+					config.FullSpec = value
+				}
+
+			case "remote-setup":
+				if cmdRemoteSetup == "" {
+					config.Setup = value
+				}
+			}
 		}
 	}
 
+	// Override with command-line arguments if provided
+	if cmdRemotePath != "" {
+		pathParts := strings.SplitN(cmdRemotePath, ":", 2)
+		if len(pathParts) != 2 {
+			return nil, fmt.Errorf("invalid --remote-path format, expected: user@host:/path")
+		}
+
+		userHost := pathParts[0]
+		remotePath := pathParts[1]
+
+		userHostParts := strings.SplitN(userHost, "@", 2)
+		if len(userHostParts) != 2 {
+			return nil, fmt.Errorf("invalid --remote-path format, expected: user@host:/path")
+		}
+
+		config.User = userHostParts[0]
+		config.Host = userHostParts[1]
+		config.Path = remotePath
+		config.FullSpec = cmdRemotePath
+	}
+
+	if cmdRemoteSetup != "" {
+		config.Setup = cmdRemoteSetup
+	}
+
+	// Validate that we have required configuration
 	if config.User == "" || config.Host == "" || config.Path == "" {
-		return nil, fmt.Errorf("missing required remote-path configuration")
+		if err != nil {
+			return nil, fmt.Errorf("cannot open %s and no --remote-path provided: %w", remoteSyncFile, err)
+		}
+		return nil, fmt.Errorf("missing required remote-path configuration (provide via file or --remote-path flag)")
 	}
 
 	return config, nil
