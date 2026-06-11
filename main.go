@@ -286,15 +286,32 @@ func syncRepository(gitRoot string, remote *RemoteConfig, branch string, stats *
 
 	if len(files) == 0 {
 		fmt.Println("\nNo modified or untracked files to sync")
-		return nil
+	} else {
+		fmt.Printf("\nFiles to sync: %d\n", len(files))
+
+		// Sync working tree files
+		fmt.Println("\nSyncing working tree files...")
+		if err := syncFiles(gitRoot, remote, files, stats); err != nil {
+			return fmt.Errorf("failed to sync files: %w", err)
+		}
 	}
 
-	fmt.Printf("\nFiles to sync: %d\n", len(files))
+	// Get list of all files that should exist on remote (tracked + untracked)
+	allLocalFiles, err := getAllLocalFiles(gitRoot)
+	if err != nil {
+		return fmt.Errorf("failed to get local files: %w", err)
+	}
 
-	// Sync working tree files
-	fmt.Println("\nSyncing working tree files...")
-	if err := syncFiles(gitRoot, remote, files, stats); err != nil {
-		return fmt.Errorf("failed to sync files: %w", err)
+	// Clean up files on remote that don't exist locally
+	fmt.Println("\nCleaning up remote files...")
+	if err := cleanupRemote(gitRoot, remote, allLocalFiles, stats); err != nil {
+		return fmt.Errorf("failed to cleanup remote: %w", err)
+	}
+
+	// Verify git status consistency between local and remote
+	fmt.Println("\nVerifying sync consistency...")
+	if err := verifyGitStatus(gitRoot, remote); err != nil {
+		return fmt.Errorf("sync verification failed: %w", err)
 	}
 
 	return nil
@@ -328,48 +345,92 @@ func getFilesToSync(gitRoot string) ([]string, error) {
 	var files []string
 	fileSet := make(map[string]bool)
 
-	// Get modified, added, deleted, renamed files using git status
-	cmd := exec.Command("git", "status", "--porcelain")
+	// Get modified, added, deleted, renamed files using git status with -z for null-terminated output
+	cmd := exec.Command("git", "status", "--porcelain", "-z")
 	cmd.Dir = gitRoot
 	output, err := cmd.Output()
 	if err != nil {
 		return nil, err
 	}
 
-	scanner := bufio.NewScanner(bytes.NewReader(output))
-	for scanner.Scan() {
-		line := scanner.Text()
-		if len(line) < 4 {
+	// Split by null byte
+	entries := bytes.Split(output, []byte{0})
+	for _, entry := range entries {
+		if len(entry) < 4 {
 			continue
 		}
+		line := string(entry)
 		// Format: XY filename or XY old -> new
-		// Extract filename(s)
-		parts := strings.Fields(line[3:])
-		if len(parts) > 0 {
-			// Handle renames (old -> new)
-			if strings.Contains(line, " -> ") {
-				// Get both old and new filenames
-				renameParts := strings.Split(line[3:], " -> ")
-				if len(renameParts) == 2 {
-					fileSet[strings.TrimSpace(renameParts[1])] = true
-				}
-			} else {
-				fileSet[parts[0]] = true
+		filename := line[3:]
+		
+		// Handle renames (old -> new)
+		if strings.Contains(filename, " -> ") {
+			// Get new filename after arrow
+			renameParts := strings.Split(filename, " -> ")
+			if len(renameParts) == 2 {
+				fileSet[renameParts[1]] = true
 			}
+		} else {
+			fileSet[filename] = true
 		}
 	}
 
-	// Get untracked files
-	cmd = exec.Command("git", "ls-files", "--others", "--exclude-standard")
+	// Get untracked files with -z for null-terminated output
+	cmd = exec.Command("git", "ls-files", "--others", "--exclude-standard", "-z")
 	cmd.Dir = gitRoot
 	output, err = cmd.Output()
 	if err != nil {
 		return nil, err
 	}
 
-	scanner = bufio.NewScanner(bytes.NewReader(output))
-	for scanner.Scan() {
-		fileSet[scanner.Text()] = true
+	// Split by null byte
+	for _, file := range bytes.Split(output, []byte{0}) {
+		if len(file) > 0 {
+			fileSet[string(file)] = true
+		}
+	}
+
+	// Convert set to slice
+	for file := range fileSet {
+		files = append(files, file)
+	}
+
+	return files, nil
+}
+
+func getAllLocalFiles(gitRoot string) ([]string, error) {
+	var files []string
+	fileSet := make(map[string]bool)
+
+	// Get all tracked files (files in the git index)
+	// Use -z for null-terminated output to handle special characters
+	cmd := exec.Command("git", "ls-files", "-z")
+	cmd.Dir = gitRoot
+	output, err := cmd.Output()
+	if err != nil {
+		return nil, err
+	}
+
+	// Split by null byte instead of newline
+	for _, file := range bytes.Split(output, []byte{0}) {
+		if len(file) > 0 {
+			fileSet[string(file)] = true
+		}
+	}
+
+	// Get untracked files
+	cmd = exec.Command("git", "ls-files", "--others", "--exclude-standard", "-z")
+	cmd.Dir = gitRoot
+	output, err = cmd.Output()
+	if err != nil {
+		return nil, err
+	}
+
+	// Split by null byte instead of newline
+	for _, file := range bytes.Split(output, []byte{0}) {
+		if len(file) > 0 {
+			fileSet[string(file)] = true
+		}
 	}
 
 	// Convert set to slice
@@ -394,9 +455,9 @@ func ensureRemoteBranch(remote *RemoteConfig, branch string) error {
 		return fmt.Errorf("remote path is not a git repository")
 	}
 
-	// Try to checkout the branch (don't fetch, we'll sync .git if needed)
+	// Try to checkout the branch and restore all files from index
 	// Suppress all output to avoid EBCDIC encoding issues on z/OS
-	remoteCmd = buildRemoteCommand(remote, fmt.Sprintf("git checkout %s >/dev/null 2>/dev/null && echo 'OK' || echo 'FAILED'", branch))
+	remoteCmd = buildRemoteCommand(remote, fmt.Sprintf("git checkout -f %s >/dev/null 2>/dev/null && echo 'OK' || echo 'FAILED'", branch))
 	cmd = exec.Command("ssh", fmt.Sprintf("%s@%s", remote.User, remote.Host), remoteCmd)
 	output, _ = cmd.Output()
 	
@@ -646,6 +707,76 @@ func cleanupRemote(gitRoot string, remote *RemoteConfig, localFiles []string, st
 	}
 
 	fmt.Printf("✓ Cleaned up %d files\n", len(filesToDelete))
+	return nil
+}
+
+func verifyGitStatus(gitRoot string, remote *RemoteConfig) error {
+	// Get local git status
+	cmd := exec.Command("git", "status", "--porcelain", "-z")
+	cmd.Dir = gitRoot
+	localOutput, err := cmd.Output()
+	if err != nil {
+		return fmt.Errorf("failed to get local git status: %w", err)
+	}
+
+	// Get remote git status
+	remoteCmd := buildRemoteCommand(remote, "git status --porcelain -z")
+	cmd = exec.Command("ssh", fmt.Sprintf("%s@%s", remote.User, remote.Host), remoteCmd)
+	remoteOutput, err := cmd.Output()
+	if err != nil {
+		return fmt.Errorf("failed to get remote git status: %w", err)
+	}
+
+	// Parse local status
+	localFiles := make(map[string]string)
+	for _, entry := range bytes.Split(localOutput, []byte{0}) {
+		if len(entry) < 4 {
+			continue
+		}
+		status := string(entry[:2])
+		filename := string(entry[3:])
+		localFiles[filename] = status
+	}
+
+	// Parse remote status
+	remoteFiles := make(map[string]string)
+	for _, entry := range bytes.Split(remoteOutput, []byte{0}) {
+		if len(entry) < 4 {
+			continue
+		}
+		status := string(entry[:2])
+		filename := string(entry[3:])
+		remoteFiles[filename] = status
+	}
+
+	// Compare statuses
+	var inconsistencies []string
+	
+	// Check for files in local but not in remote or with different status
+	for file, localStatus := range localFiles {
+		if remoteStatus, exists := remoteFiles[file]; !exists {
+			inconsistencies = append(inconsistencies, fmt.Sprintf("  %s: local=%s remote=clean", file, localStatus))
+		} else if localStatus != remoteStatus {
+			inconsistencies = append(inconsistencies, fmt.Sprintf("  %s: local=%s remote=%s", file, localStatus, remoteStatus))
+		}
+	}
+
+	// Check for files in remote but not in local
+	for file, remoteStatus := range remoteFiles {
+		if _, exists := localFiles[file]; !exists {
+			inconsistencies = append(inconsistencies, fmt.Sprintf("  %s: local=clean remote=%s", file, remoteStatus))
+		}
+	}
+
+	if len(inconsistencies) > 0 {
+		fmt.Printf("⚠ Git status inconsistencies detected (%d):\n", len(inconsistencies))
+		for _, msg := range inconsistencies {
+			fmt.Println(msg)
+		}
+		return fmt.Errorf("git status mismatch between local and remote")
+	}
+
+	fmt.Println("✓ Git status is consistent between local and remote")
 	return nil
 }
 

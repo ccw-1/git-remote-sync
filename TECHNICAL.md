@@ -484,7 +484,14 @@ ssh user@host 'cd /path && git init'
 
 ## Version History
 
-### v1.1.0 (Current)
+### v1.2.0 (Current)
+- Git status verification after sync
+- Automatic cleanup of deleted files
+- Special character support in filenames (using git -z flag)
+- Force checkout with `git checkout -f` to clean working directory
+- Null-terminated git output parsing for robust filename handling
+
+### v1.1.0
 - Command-line flag support (`-remote-path`, `-remote-setup`)
 - Config file now optional (can use flags only)
 - Flags override config file settings
@@ -498,7 +505,7 @@ ssh user@host 'cd /path && git init'
 - Remote environment setup
 - Config file based configuration
 
-### Planned for v1.2.0
+### Planned for v1.3.0
 - Parallel transfers
 - Progress indicators
 - Dry run mode
