@@ -14,8 +14,10 @@ import (
 
 const (
 	remoteSyncFile = "._remote_sync"
-	version        = "1.0.0"
+	version        = "1.3.0"
 )
+
+var verbose bool
 
 type RemoteConfig struct {
 	User     string
@@ -37,9 +39,12 @@ func main() {
 	remotePath := flag.String("remote-path", "", "Remote path in format user@host:/path (overrides config file)")
 	remoteSetup := flag.String("remote-setup", "", "Remote setup command (overrides config file)")
 	showHelp := flag.Bool("h", false, "Show help message")
-	showVersion := flag.Bool("v", false, "Show version information")
+	showVersion := flag.Bool("version", false, "Show version information")
+	verboseFlag := flag.Bool("v", false, "Verbose mode - show all git commands")
 	
 	flag.Parse()
+
+	verbose = *verboseFlag
 
 	if *showHelp {
 		printHelp()
@@ -113,7 +118,8 @@ Config file format:
 
 Options:
   -h, -help              Show this help message
-  -v, -version           Show version information
+  -version               Show version information
+  -v                     Verbose mode - show all git commands (prefixed with L: or R:)
   -remote-path string    Remote path in format user@host:/path (overrides config file)
   -remote-setup string   Remote setup command (overrides config file)
 
@@ -135,7 +141,15 @@ using iconv (codepage 1047 to 819).
 `, version, remoteSyncFile)
 }
 
+func logCommand(location string, command string) {
+	if verbose {
+		fmt.Printf("%s: %s\n", location, command)
+	}
+}
+
 func getGitRoot() (string, error) {
+	cmdStr := "git rev-parse --show-toplevel"
+	logCommand("L", cmdStr)
 	cmd := exec.Command("git", "rev-parse", "--show-toplevel")
 	output, err := cmd.Output()
 	if err != nil {
@@ -235,6 +249,8 @@ func readRemoteConfig(path string, cmdRemotePath string, cmdRemoteSetup string) 
 }
 
 func getCurrentBranch() (string, error) {
+	cmdStr := "git rev-parse --abbrev-ref HEAD"
+	logCommand("L", cmdStr)
 	cmd := exec.Command("git", "rev-parse", "--abbrev-ref", "HEAD")
 	output, err := cmd.Output()
 	if err != nil {
@@ -278,6 +294,12 @@ func syncRepository(gitRoot string, remote *RemoteConfig, branch string, stats *
 		return fmt.Errorf("failed to set remote branch: %w", err)
 	}
 
+	// Sync commits using git bundle to avoid .git permission issues
+	fmt.Println("\nSyncing commit history...")
+	if err := syncCommitsViaBundle(gitRoot, remote, branch, stats); err != nil {
+		return fmt.Errorf("failed to sync commits: %w", err)
+	}
+
 	// Get list of modified and untracked files
 	files, err := getFilesToSync(gitRoot)
 	if err != nil {
@@ -318,6 +340,8 @@ func syncRepository(gitRoot string, remote *RemoteConfig, branch string, stats *
 }
 
 func getLocalHead(gitRoot string) (string, error) {
+	cmdStr := "git rev-parse HEAD"
+	logCommand("L", cmdStr)
 	cmd := exec.Command("git", "rev-parse", "HEAD")
 	cmd.Dir = gitRoot
 	output, err := cmd.Output()
@@ -328,6 +352,8 @@ func getLocalHead(gitRoot string) (string, error) {
 }
 
 func getRemoteHead(remote *RemoteConfig) (string, error) {
+	gitCmd := "git rev-parse HEAD"
+	logCommand("R", gitCmd)
 	remoteCmd := buildRemoteCommand(remote, "git rev-parse HEAD 2>/dev/null || echo NOHEAD")
 	cmd := exec.Command("ssh", fmt.Sprintf("%s@%s", remote.User, remote.Host), remoteCmd)
 	output, err := cmd.Output()
@@ -346,6 +372,8 @@ func getFilesToSync(gitRoot string) ([]string, error) {
 	fileSet := make(map[string]bool)
 
 	// Get modified, added, deleted, renamed files using git status with -z for null-terminated output
+	cmdStr := "git status --porcelain -z"
+	logCommand("L", cmdStr)
 	cmd := exec.Command("git", "status", "--porcelain", "-z")
 	cmd.Dir = gitRoot
 	output, err := cmd.Output()
@@ -376,6 +404,8 @@ func getFilesToSync(gitRoot string) ([]string, error) {
 	}
 
 	// Get untracked files with -z for null-terminated output
+	cmdStr = "git ls-files --others --exclude-standard -z"
+	logCommand("L", cmdStr)
 	cmd = exec.Command("git", "ls-files", "--others", "--exclude-standard", "-z")
 	cmd.Dir = gitRoot
 	output, err = cmd.Output()
@@ -404,6 +434,8 @@ func getAllLocalFiles(gitRoot string) ([]string, error) {
 
 	// Get all tracked files (files in the git index)
 	// Use -z for null-terminated output to handle special characters
+	cmdStr := "git ls-files -z"
+	logCommand("L", cmdStr)
 	cmd := exec.Command("git", "ls-files", "-z")
 	cmd.Dir = gitRoot
 	output, err := cmd.Output()
@@ -419,6 +451,8 @@ func getAllLocalFiles(gitRoot string) ([]string, error) {
 	}
 
 	// Get untracked files
+	cmdStr = "git ls-files --others --exclude-standard -z"
+	logCommand("L", cmdStr)
 	cmd = exec.Command("git", "ls-files", "--others", "--exclude-standard", "-z")
 	cmd.Dir = gitRoot
 	output, err = cmd.Output()
@@ -441,8 +475,61 @@ func getAllLocalFiles(gitRoot string) ([]string, error) {
 	return files, nil
 }
 
+func syncCommitsViaBundle(gitRoot string, remote *RemoteConfig, branch string, stats *SyncStats) error {
+	// Get local HEAD commit
+	localHead, err := getLocalHead(gitRoot)
+	if err != nil {
+		return fmt.Errorf("failed to get local HEAD: %w", err)
+	}
+
+	// Get remote HEAD commit
+	remoteHead, err := getRemoteHead(remote)
+	if err == nil && localHead == remoteHead {
+		fmt.Printf("✓ Remote already at commit: %s\n", localHead[:8])
+		return nil
+	}
+
+	// Create a git bundle with all commits
+	bundlePath := filepath.Join(os.TempDir(), fmt.Sprintf("git-sync-%d.bundle", time.Now().Unix()))
+	defer os.Remove(bundlePath)
+
+	// Create bundle from all branches and tags
+	cmdStr := fmt.Sprintf("git bundle create %s --all", bundlePath)
+	logCommand("L", cmdStr)
+	cmd := exec.Command("git", "bundle", "create", bundlePath, "--all")
+	cmd.Dir = gitRoot
+	if output, err := cmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("failed to create bundle: %w\nOutput: %s", err, string(output))
+	}
+
+	// Transfer bundle to remote using cat over SSH to avoid scp text mode issues on z/OS
+	// This ensures binary transfer without EBCDIC conversion
+	transferCmd := fmt.Sprintf("cat %s | ssh %s@%s 'cat > /tmp/git-sync.bundle'", bundlePath, remote.User, remote.Host)
+	cmd = exec.Command("bash", "-c", transferCmd)
+	if output, err := cmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("failed to transfer bundle: %w\nOutput: %s", err, string(output))
+	}
+
+	// Apply bundle on remote: unbundle → update refs → reset to commit
+	gitCmd := fmt.Sprintf("git bundle unbundle /tmp/git-sync.bundle && git update-ref refs/heads/%s %s && git symbolic-ref HEAD refs/heads/%s && git reset --hard %s", branch, localHead, branch, localHead)
+	logCommand("R", gitCmd)
+	remoteCmd := buildRemoteCommand(remote, fmt.Sprintf("git bundle unbundle /tmp/git-sync.bundle >/dev/null 2>&1 && rm /tmp/git-sync.bundle && git update-ref refs/heads/%s %s >/dev/null 2>&1 && git symbolic-ref HEAD refs/heads/%s >/dev/null 2>&1 && git reset --hard %s >/dev/null 2>&1 && echo 'OK' || echo 'FAILED'", branch, localHead, branch, localHead))
+	cmd = exec.Command("ssh", fmt.Sprintf("%s@%s", remote.User, remote.Host), remoteCmd)
+	output, err := cmd.CombinedOutput()
+	
+	outputStr := strings.TrimSpace(string(output))
+	if err != nil || !strings.Contains(outputStr, "OK") {
+		return fmt.Errorf("failed to apply bundle on remote: %v\nOutput: %s", err, outputStr)
+	}
+
+	fmt.Printf("✓ Synced commits to: %s\n", localHead[:8])
+	return nil
+}
+
 func ensureRemoteBranch(remote *RemoteConfig, branch string) error {
 	// Check if remote is a git repository
+	gitCmd := "git rev-parse --git-dir"
+	logCommand("R", gitCmd)
 	remoteCmd := buildRemoteCommand(remote, "git rev-parse --git-dir > /dev/null 2>&1 && echo OK || echo NOTGIT")
 	cmd := exec.Command("ssh", fmt.Sprintf("%s@%s", remote.User, remote.Host), remoteCmd)
 	
@@ -455,17 +542,57 @@ func ensureRemoteBranch(remote *RemoteConfig, branch string) error {
 		return fmt.Errorf("remote path is not a git repository")
 	}
 
-	// Try to checkout the branch and restore all files from index
-	// Suppress all output to avoid EBCDIC encoding issues on z/OS
-	remoteCmd = buildRemoteCommand(remote, fmt.Sprintf("git checkout -f %s >/dev/null 2>/dev/null && echo 'OK' || echo 'FAILED'", branch))
+	// Fetch all branches from origin to ensure remote is up to date
+	gitCmd = "git fetch --all -f"
+	logCommand("R", gitCmd)
+	remoteCmd = buildRemoteCommand(remote, "git fetch --all -f >/dev/null 2>/dev/null && echo 'FETCHED' || echo 'FETCHFAILED'")
 	cmd = exec.Command("ssh", fmt.Sprintf("%s@%s", remote.User, remote.Host), remoteCmd)
 	output, _ = cmd.Output()
 	
-	result := strings.TrimSpace(string(output))
-	if result == "OK" {
-		fmt.Printf("✓ Remote branch: %s\n", branch)
-	} else if result == "FAILED" {
-		fmt.Printf("⚠ Remote branch checkout failed: %s\n", branch)
+	fetchResult := strings.TrimSpace(string(output))
+	if fetchResult == "FETCHED" {
+		fmt.Println("✓ Fetched latest branches from origin")
+	} else {
+		fmt.Println("⚠ Failed to fetch from origin (continuing anyway)")
+	}
+
+	// Check if branch exists on remote
+	gitCmd = fmt.Sprintf("git rev-parse --verify %s", branch)
+	logCommand("R", gitCmd)
+	remoteCmd = buildRemoteCommand(remote, fmt.Sprintf("git rev-parse --verify %s >/dev/null 2>/dev/null && echo 'EXISTS' || echo 'NOTEXISTS'", branch))
+	cmd = exec.Command("ssh", fmt.Sprintf("%s@%s", remote.User, remote.Host), remoteCmd)
+	output, _ = cmd.Output()
+	
+	branchExists := strings.TrimSpace(string(output)) == "EXISTS"
+	
+	if branchExists {
+		// Branch exists, checkout and restore all files to match HEAD, then stage all changes
+		gitCmd = fmt.Sprintf("git checkout %s && git reset --hard HEAD && git clean -fd && git add -A", branch)
+		logCommand("R", gitCmd)
+		remoteCmd = buildRemoteCommand(remote, fmt.Sprintf("git checkout %s >/dev/null 2>/dev/null && git reset --hard HEAD >/dev/null 2>/dev/null && git clean -fd >/dev/null 2>/dev/null && git add -A >/dev/null 2>/dev/null && echo 'OK' || echo 'FAILED'", branch))
+		cmd = exec.Command("ssh", fmt.Sprintf("%s@%s", remote.User, remote.Host), remoteCmd)
+		output, _ = cmd.Output()
+		
+		result := strings.TrimSpace(string(output))
+		if result == "OK" {
+			fmt.Printf("✓ Remote branch: %s\n", branch)
+		} else {
+			fmt.Printf("⚠ Remote branch checkout failed: %s\n", branch)
+		}
+	} else {
+		// Branch doesn't exist, create it and restore all files, then stage all changes
+		gitCmd = fmt.Sprintf("git checkout -b %s && git reset --hard HEAD && git clean -fd && git add -A", branch)
+		logCommand("R", gitCmd)
+		remoteCmd = buildRemoteCommand(remote, fmt.Sprintf("git checkout -b %s >/dev/null 2>/dev/null && git reset --hard HEAD >/dev/null 2>/dev/null && git clean -fd >/dev/null 2>/dev/null && git add -A >/dev/null 2>/dev/null && echo 'CREATED' || echo 'FAILED'", branch))
+		cmd = exec.Command("ssh", fmt.Sprintf("%s@%s", remote.User, remote.Host), remoteCmd)
+		output, _ = cmd.Output()
+		
+		result := strings.TrimSpace(string(output))
+		if result == "CREATED" {
+			fmt.Printf("✓ Remote branch created: %s\n", branch)
+		} else {
+			fmt.Printf("⚠ Failed to create remote branch: %s\n", branch)
+		}
 	}
 
 	return nil
@@ -707,11 +834,19 @@ func cleanupRemote(gitRoot string, remote *RemoteConfig, localFiles []string, st
 	}
 
 	fmt.Printf("✓ Cleaned up %d files\n", len(filesToDelete))
+	
+	// After cleanup, reset git index to match HEAD to clear any staged deletions
+	remoteResetCmd := buildRemoteCommand(remote, "git reset HEAD >/dev/null 2>/dev/null && git checkout -- . >/dev/null 2>/dev/null || true")
+	cmd = exec.Command("ssh", fmt.Sprintf("%s@%s", remote.User, remote.Host), remoteResetCmd)
+	_ = cmd.Run() // Ignore errors, this is best-effort cleanup
+	
 	return nil
 }
 
 func verifyGitStatus(gitRoot string, remote *RemoteConfig) error {
 	// Get local git status
+	cmdStr := "git status --porcelain -z"
+	logCommand("L", cmdStr)
 	cmd := exec.Command("git", "status", "--porcelain", "-z")
 	cmd.Dir = gitRoot
 	localOutput, err := cmd.Output()
@@ -720,6 +855,8 @@ func verifyGitStatus(gitRoot string, remote *RemoteConfig) error {
 	}
 
 	// Get remote git status
+	cmdStr = "git status --porcelain -z"
+	logCommand("R", cmdStr)
 	remoteCmd := buildRemoteCommand(remote, "git status --porcelain -z")
 	cmd = exec.Command("ssh", fmt.Sprintf("%s@%s", remote.User, remote.Host), remoteCmd)
 	remoteOutput, err := cmd.Output()

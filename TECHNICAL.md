@@ -484,7 +484,15 @@ ssh user@host 'cd /path && git init'
 
 ## Version History
 
-### v1.2.0 (Current)
+### v1.3.0 (Current)
+- **Commit-level synchronization** - Uses git bundle to sync commits without permission issues
+- Ensures remote repository is at the exact same commit as local
+- Fixes issue where branches were on same name but different commits
+- Creates git bundle with all commits and transfers via scp
+- Applies bundle on remote and resets HEAD to match local commit
+- Avoids .git directory sync to prevent file permission problems
+
+### v1.2.0
 - Git status verification after sync
 - Automatic cleanup of deleted files
 - Special character support in filenames (using git -z flag)

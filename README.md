@@ -10,6 +10,7 @@ A utility to keep a remote git repository in sync with your local one via SSH, w
 ## Features
 
 - **Direct SSH synchronization** - No need for git push/pull
+- **Commit-level sync** - Ensures remote is at the same commit as local (syncs .git directory and resets HEAD)
 - **z/OS support** - Automatic EBCDIC/ASCII conversion using `iconv` (codepage 1047 to 819)
 - **Complete state sync** - Syncs working tree and .git directory
 - **Batch processing** - Efficient transfer of multiple files
