@@ -489,14 +489,18 @@ func syncCommitsViaBundle(gitRoot string, remote *RemoteConfig, branch string, s
 		return nil
 	}
 
-	// Create a git bundle with all commits
+	// Remote is behind - need to sync commits
+	// Git push won't work with remote-setup (git-receive-pack needs git in PATH)
+	// Use bundle method which allows running setup commands before git operations
+
+	// Create a minimal bundle with only the current branch
 	bundlePath := filepath.Join(os.TempDir(), fmt.Sprintf("git-sync-%d.bundle", time.Now().Unix()))
 	defer os.Remove(bundlePath)
 
-	// Create bundle from all branches and tags
-	cmdStr := fmt.Sprintf("git bundle create %s --all", bundlePath)
+	// Create bundle with only current branch (not --all) to minimize size
+	cmdStr := fmt.Sprintf("git bundle create %s %s", bundlePath, branch)
 	logCommand("L", cmdStr)
-	cmd := exec.Command("git", "bundle", "create", bundlePath, "--all")
+	cmd := exec.Command("git", "bundle", "create", bundlePath, branch)
 	cmd.Dir = gitRoot
 	if output, err := cmd.CombinedOutput(); err != nil {
 		return fmt.Errorf("failed to create bundle: %w\nOutput: %s", err, string(output))
