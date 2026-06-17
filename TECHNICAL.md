@@ -485,12 +485,11 @@ ssh user@host 'cd /path && git init'
 ## Version History
 
 ### v1.3.0 (Current)
-- **Commit-level synchronization** - Uses git bundle to sync commits without permission issues
+- **Commit-level synchronization** - Direct ref update to sync commits
 - **Optimized network traffic** - Skips sync when already at same commit (zero traffic)
-- **Single-branch bundle** - Changed from `--all` to single branch (50-90% less data)
 - **Verbose mode (-v)** - Shows all git commands with L: (local) or R: (remote) prefixes
-- Binary-safe transfer via `cat | ssh | cat` pipeline (prevents EBCDIC corruption on z/OS)
-- Proper git operations: unbundle → update-ref → symbolic-ref → reset
+- Uses `git update-ref` + `git reset --hard` on remote (avoids bundle pack corruption)
+- Assumes remote has objects from previous syncs or git fetch
 - Ensures remote repository is at the exact same commit as local
 - Fixes issue where branches were on same name but different commits
 - Version flag changed to `--version` (was `-v`)

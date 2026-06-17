@@ -490,40 +490,17 @@ func syncCommitsViaBundle(gitRoot string, remote *RemoteConfig, branch string, s
 	}
 
 	// Remote is behind - need to sync commits
-	// Git push won't work with remote-setup (git-receive-pack needs git in PATH)
-	// Use bundle method which allows running setup commands before git operations
-
-	// Create a minimal bundle with only the current branch
-	bundlePath := filepath.Join(os.TempDir(), fmt.Sprintf("git-sync-%d.bundle", time.Now().Unix()))
-	defer os.Remove(bundlePath)
-
-	// Create bundle with only current branch (not --all) to minimize size
-	cmdStr := fmt.Sprintf("git bundle create %s %s", bundlePath, branch)
-	logCommand("L", cmdStr)
-	cmd := exec.Command("git", "bundle", "create", bundlePath, branch)
-	cmd.Dir = gitRoot
-	if output, err := cmd.CombinedOutput(); err != nil {
-		return fmt.Errorf("failed to create bundle: %w\nOutput: %s", err, string(output))
-	}
-
-	// Transfer bundle to remote using cat over SSH to avoid scp text mode issues on z/OS
-	// This ensures binary transfer without EBCDIC conversion
-	transferCmd := fmt.Sprintf("cat %s | ssh %s@%s 'cat > /tmp/git-sync.bundle'", bundlePath, remote.User, remote.Host)
-	cmd = exec.Command("bash", "-c", transferCmd)
-	if output, err := cmd.CombinedOutput(); err != nil {
-		return fmt.Errorf("failed to transfer bundle: %w\nOutput: %s", err, string(output))
-	}
-
-	// Apply bundle on remote: unbundle → update refs → reset to commit
-	gitCmd := fmt.Sprintf("git bundle unbundle /tmp/git-sync.bundle && git update-ref refs/heads/%s %s && git symbolic-ref HEAD refs/heads/%s && git reset --hard %s", branch, localHead, branch, localHead)
+	// Directly update refs on remote (avoids bundle pack corruption issues)
+	
+	gitCmd := fmt.Sprintf("git update-ref refs/heads/%s %s && git symbolic-ref HEAD refs/heads/%s && git reset --hard %s", branch, localHead, branch, localHead)
 	logCommand("R", gitCmd)
-	remoteCmd := buildRemoteCommand(remote, fmt.Sprintf("git bundle unbundle /tmp/git-sync.bundle >/dev/null 2>&1 && rm /tmp/git-sync.bundle && git update-ref refs/heads/%s %s >/dev/null 2>&1 && git symbolic-ref HEAD refs/heads/%s >/dev/null 2>&1 && git reset --hard %s >/dev/null 2>&1 && echo 'OK' || echo 'FAILED'", branch, localHead, branch, localHead))
-	cmd = exec.Command("ssh", fmt.Sprintf("%s@%s", remote.User, remote.Host), remoteCmd)
+	remoteCmd := buildRemoteCommand(remote, fmt.Sprintf("git update-ref refs/heads/%s %s >/dev/null 2>&1 && git symbolic-ref HEAD refs/heads/%s >/dev/null 2>&1 && git reset --hard %s >/dev/null 2>&1 && echo 'OK' || echo 'FAILED'", branch, localHead, branch, localHead))
+	cmd := exec.Command("ssh", fmt.Sprintf("%s@%s", remote.User, remote.Host), remoteCmd)
 	output, err := cmd.CombinedOutput()
 	
 	outputStr := strings.TrimSpace(string(output))
 	if err != nil || !strings.Contains(outputStr, "OK") {
-		return fmt.Errorf("failed to apply bundle on remote: %v\nOutput: %s", err, outputStr)
+		return fmt.Errorf("failed to update remote refs: %v\nOutput: %s", err, outputStr)
 	}
 
 	fmt.Printf("✓ Synced commits to: %s\n", localHead[:8])

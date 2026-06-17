@@ -10,8 +10,8 @@ A utility to keep a remote git repository in sync with your local one via SSH, w
 ## Features
 
 - **Direct SSH synchronization** - No need for git push/pull
-- **Commit-level sync** - Ensures remote is at the same commit as local
-- **Optimized network traffic** - Skips sync when already at same commit, uses single-branch bundle
+- **Commit-level sync** - Ensures remote is at the same commit as local using direct ref updates
+- **Optimized network traffic** - Skips sync when already at same commit (zero traffic)
 - **Verbose mode** - Show all git commands with `-v` flag (L: local, R: remote)
 - **z/OS support** - Automatic EBCDIC/ASCII conversion using `iconv` (codepage 1047 to 819)
 - **Complete state sync** - Syncs working tree and commit history
