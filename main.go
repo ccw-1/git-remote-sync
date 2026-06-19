@@ -761,9 +761,10 @@ func syncFileBatch(gitRoot string, remote *RemoteConfig, files []string, isZOS b
 }
 
 func cleanupRemote(gitRoot string, remote *RemoteConfig, localFiles []string, stats *SyncStats) error {
-	// Get list of files on remote
-	remoteFindCmd := buildRemoteCommand(remote, fmt.Sprintf("find . -type f ! -path './.git/*' ! -name '%s' 2>/dev/null", remoteSyncFile))
-	cmd := exec.Command("ssh", fmt.Sprintf("%s@%s", remote.User, remote.Host), remoteFindCmd)
+	// Get list of tracked and untracked (not ignored) files on remote
+	// This matches what we sync: tracked files + untracked files (excluding .gitignore)
+	remoteFilesCmd := buildRemoteCommand(remote, "git ls-files -z && git ls-files --others --exclude-standard -z")
+	cmd := exec.Command("ssh", fmt.Sprintf("%s@%s", remote.User, remote.Host), remoteFilesCmd)
 	
 	output, err := cmd.Output()
 	if err != nil {
@@ -776,14 +777,13 @@ func cleanupRemote(gitRoot string, remote *RemoteConfig, localFiles []string, st
 		localFileMap[f] = true
 	}
 
-	// Find files to delete
+	// Find files to delete (only tracked + untracked non-ignored files)
 	var filesToDelete []string
-	scanner := bufio.NewScanner(bytes.NewReader(output))
-	for scanner.Scan() {
-		remoteFile := strings.TrimPrefix(scanner.Text(), "./")
-		if remoteFile == "" || remoteFile == "." {
+	for _, file := range bytes.Split(output, []byte{0}) {
+		if len(file) == 0 {
 			continue
 		}
+		remoteFile := string(file)
 		if !localFileMap[remoteFile] {
 			filesToDelete = append(filesToDelete, remoteFile)
 		}
@@ -807,9 +807,9 @@ func cleanupRemote(gitRoot string, remote *RemoteConfig, localFiles []string, st
 
 		// Build rm command
 		remoteRmCmd := buildRemoteCommand(remote, fmt.Sprintf("rm -f %s", strings.Join(batch, " ")))
-		cmd := exec.Command("ssh", fmt.Sprintf("%s@%s", remote.User, remote.Host), remoteRmCmd)
+		rmCmd := exec.Command("ssh", fmt.Sprintf("%s@%s", remote.User, remote.Host), remoteRmCmd)
 		
-		if err := cmd.Run(); err != nil {
+		if err := rmCmd.Run(); err != nil {
 			stats.Errors = append(stats.Errors, fmt.Sprintf("failed to delete batch %d-%d: %v", i, end, err))
 		}
 	}
@@ -818,8 +818,8 @@ func cleanupRemote(gitRoot string, remote *RemoteConfig, localFiles []string, st
 	
 	// After cleanup, reset git index to match HEAD to clear any staged deletions
 	remoteResetCmd := buildRemoteCommand(remote, "git reset HEAD >/dev/null 2>/dev/null && git checkout -- . >/dev/null 2>/dev/null || true")
-	cmd = exec.Command("ssh", fmt.Sprintf("%s@%s", remote.User, remote.Host), remoteResetCmd)
-	_ = cmd.Run() // Ignore errors, this is best-effort cleanup
+	resetCmd := exec.Command("ssh", fmt.Sprintf("%s@%s", remote.User, remote.Host), remoteResetCmd)
+	_ = resetCmd.Run() // Ignore errors, this is best-effort cleanup
 	
 	return nil
 }
