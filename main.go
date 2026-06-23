@@ -52,7 +52,7 @@ func main() {
 	}
 
 	if *showVersion {
-		fmt.Printf("git-remote-sync version %s\n", version)
+		printVersion()
 		return
 	}
 
@@ -99,6 +99,26 @@ func main() {
 
 	// Print summary
 	printSummary(stats)
+}
+
+func printVersion() {
+	fmt.Printf("git-remote-sync version %s\n", version)
+	
+	// Try to get git commit hash
+	cmd := exec.Command("git", "rev-parse", "--short", "HEAD")
+	cmd.Dir = filepath.Dir(os.Args[0])
+	if output, err := cmd.Output(); err == nil {
+		commit := strings.TrimSpace(string(output))
+		fmt.Printf("commit: %s\n", commit)
+	}
+	
+	// Try to get git commit date
+	cmd = exec.Command("git", "log", "-1", "--format=%ci")
+	cmd.Dir = filepath.Dir(os.Args[0])
+	if output, err := cmd.Output(); err == nil {
+		date := strings.TrimSpace(string(output))
+		fmt.Printf("date: %s\n", date)
+	}
 }
 
 func printHelp() {
