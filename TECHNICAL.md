@@ -484,7 +484,17 @@ ssh user@host 'cd /path && git init'
 
 ## Version History
 
-### v1.3.0 (Current)
+### v1.4.0 (Current)
+- **Automatic push detection** - Detects unpushed local commits automatically
+- **Safe push validation** - Uses `git merge-base --is-ancestor` to ensure fast-forward
+- **Auto-push to origin** - Pushes commits to origin if safe (no force push)
+- **Remote fetch after push** - Triggers remote to fetch newly pushed commits
+- **Divergence protection** - Fails with clear error if force push would be required
+- **No origin handling** - Gracefully skips push check if no origin configured
+- Fixes issue where local-only commits caused sync failures
+- Eliminates need for manual `git push` before sync
+
+### v1.3.0
 - **Commit-level synchronization** - Direct ref update to sync commits
 - **Optimized network traffic** - Skips sync when already at same commit (zero traffic)
 - **Verbose mode (-v)** - Shows all git commands with L: (local) or R: (remote) prefixes
@@ -515,7 +525,7 @@ ssh user@host 'cd /path && git init'
 - Remote environment setup
 - Config file based configuration
 
-### Planned for v1.3.0
+### Planned for Future Versions
 - Parallel transfers
 - Progress indicators
 - Dry run mode

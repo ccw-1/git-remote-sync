@@ -14,7 +14,7 @@ import (
 
 const (
 	remoteSyncFile = "._remote_sync"
-	version        = "1.3.0"
+	version        = "1.4.0"
 )
 
 var verbose bool
@@ -489,6 +489,29 @@ func syncCommitsViaBundle(gitRoot string, remote *RemoteConfig, branch string, s
 		return nil
 	}
 
+	// Check if local commits need to be pushed to origin first
+	pushed, err := ensureCommitsPushedToOrigin(gitRoot, branch, localHead)
+	if err != nil {
+		return fmt.Errorf("failed to ensure commits are pushed: %w", err)
+	}
+
+	// If we just pushed, remote needs to fetch again to get the new commits
+	if pushed {
+		fmt.Println("Fetching newly pushed commits on remote...")
+		gitCmd := "git fetch --all -f"
+		logCommand("R", gitCmd)
+		remoteCmd := buildRemoteCommand(remote, "git fetch --all -f >/dev/null 2>/dev/null && echo 'FETCHED' || echo 'FETCHFAILED'")
+		cmd := exec.Command("ssh", fmt.Sprintf("%s@%s", remote.User, remote.Host), remoteCmd)
+		output, _ := cmd.Output()
+		
+		fetchResult := strings.TrimSpace(string(output))
+		if fetchResult == "FETCHED" {
+			fmt.Println("✓ Remote fetched newly pushed commits")
+		} else {
+			return fmt.Errorf("remote failed to fetch after push")
+		}
+	}
+
 	// Remote is behind - need to sync commits
 	// Directly update refs on remote (avoids bundle pack corruption issues)
 	
@@ -505,6 +528,71 @@ func syncCommitsViaBundle(gitRoot string, remote *RemoteConfig, branch string, s
 
 	fmt.Printf("✓ Synced commits to: %s\n", localHead[:8])
 	return nil
+}
+
+func ensureCommitsPushedToOrigin(gitRoot string, branch string, localHead string) (bool, error) {
+	// Check if origin remote exists
+	cmdStr := "git remote get-url origin"
+	logCommand("L", cmdStr)
+	cmd := exec.Command("git", "remote", "get-url", "origin")
+	cmd.Dir = gitRoot
+	originURL, err := cmd.Output()
+	if err != nil {
+		// No origin configured, skip push check
+		fmt.Println("⚠ No origin remote configured, skipping push check")
+		return false, nil
+	}
+	
+	originURLStr := strings.TrimSpace(string(originURL))
+	fmt.Printf("Origin: %s\n", originURLStr)
+	
+	// Get the commit hash that origin/branch points to
+	cmdStr = fmt.Sprintf("git rev-parse origin/%s", branch)
+	logCommand("L", cmdStr)
+	cmd = exec.Command("git", "rev-parse", fmt.Sprintf("origin/%s", branch))
+	cmd.Dir = gitRoot
+	output, err := cmd.Output()
+	
+	var originBranchHead string
+	if err != nil {
+		// Branch doesn't exist on origin yet
+		fmt.Printf("Branch '%s' not found on origin, will push...\n", branch)
+	} else {
+		originBranchHead = strings.TrimSpace(string(output))
+		
+		// Check if local and origin are at same commit
+		if originBranchHead == localHead {
+			fmt.Println("✓ Local commits already pushed to origin")
+			return false, nil
+		}
+		
+		// Check if local is ahead of origin (fast-forward possible)
+		cmdStr = fmt.Sprintf("git merge-base --is-ancestor origin/%s HEAD", branch)
+		logCommand("L", cmdStr)
+		cmd = exec.Command("git", "merge-base", "--is-ancestor", fmt.Sprintf("origin/%s", branch), "HEAD")
+		cmd.Dir = gitRoot
+		err = cmd.Run()
+		
+		if err != nil {
+			// Not a fast-forward, would require force push
+			return false, fmt.Errorf("local branch has diverged from origin/%s - force push required. Please resolve manually:\n  git push --force-with-lease origin %s", branch, branch)
+		}
+	}
+	
+	// Push is safe (fast-forward or new branch)
+	fmt.Printf("Pushing local commits to origin/%s...\n", branch)
+	cmdStr = fmt.Sprintf("git push origin %s", branch)
+	logCommand("L", cmdStr)
+	cmd = exec.Command("git", "push", "origin", branch)
+	cmd.Dir = gitRoot
+	output, err = cmd.CombinedOutput()
+	
+	if err != nil {
+		return false, fmt.Errorf("failed to push to origin: %w\nOutput: %s", err, string(output))
+	}
+	
+	fmt.Println("✓ Pushed commits to origin")
+	return true, nil
 }
 
 func ensureRemoteBranch(remote *RemoteConfig, branch string) error {

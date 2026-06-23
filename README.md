@@ -10,6 +10,8 @@ A utility to keep a remote git repository in sync with your local one via SSH, w
 ## Features
 
 - **Direct SSH synchronization** - No need for git push/pull
+- **Automatic push detection** - Detects unpushed commits and pushes them to origin automatically (v1.4.0+)
+- **Safe push validation** - Only pushes if fast-forward is possible, fails on divergence
 - **Commit-level sync** - Ensures remote is at the same commit as local using direct ref updates
 - **Optimized network traffic** - Skips sync when already at same commit (zero traffic)
 - **Verbose mode** - Show all git commands with `-v` flag (L: local, R: remote)
@@ -97,10 +99,12 @@ The utility will:
 1. Read configuration from file and/or command-line flags
 2. Verify SSH connectivity
 3. Run remote-setup commands (if configured)
-4. Sync all tracked and untracked files
-5. Clean up files on remote that don't exist locally
-6. Verify git status consistency
-7. Display a summary
+4. Check for unpushed commits and push them to origin if safe (v1.4.0+)
+5. Sync commit history to remote
+6. Sync all tracked and untracked files
+7. Clean up files on remote that don't exist locally
+8. Verify git status consistency
+9. Display a summary
 
 ### Command-Line Options
 
@@ -158,6 +162,41 @@ tar -cf - files | ssh user@host 'cd /path && /bin/iconv -f 1047 -t 819 | /bin/ta
 ```
 
 ## Requirements
+
+
+### Automatic Push Detection (v1.4.0+)
+
+The tool automatically detects unpushed local commits and handles them intelligently:
+
+**What it does:**
+1. Compares local HEAD with `origin/<branch>`
+2. If commits are unpushed and push is safe (fast-forward), automatically pushes to origin
+3. Triggers remote to fetch the newly pushed commits
+4. Continues with normal sync
+
+**Safety checks:**
+- Only pushes if it's a fast-forward (no force push)
+- If branch has diverged from origin, exits with error and instructions
+- Skips push if no origin remote is configured
+
+**Example output:**
+```bash
+Origin: git@github.com:user/repo.git
+Pushing local commits to origin/main...
+✓ Pushed commits to origin
+Fetching newly pushed commits on remote...
+✓ Remote fetched newly pushed commits
+✓ Synced commits to: a1b2c3d4
+```
+
+**Divergence handling:**
+If your local branch has diverged from origin (would require force push):
+```
+Error: local branch has diverged from origin/main - force push required.
+Please resolve manually:
+  git push --force-with-lease origin main
+```
+
 
 ### Local System
 - Git
