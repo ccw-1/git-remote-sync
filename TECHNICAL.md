@@ -496,6 +496,7 @@ ssh user@host 'cd /path && git init'
 - **Improved reliability** - Replaced tar-based transfer that caused checksum corruption
 - **Better performance** - Direct transfer tried first, iconv only as fallback
 - **Lenient verification** - Accepts synced files even if git status differs temporarily
+- **Enhanced version output** - `--version` now shows commit hash and date for debugging
 - Fixes "checksum error on tape" issue on z/OS systems
 - Maintains efficient tar-based batch transfer for Unix systems
 

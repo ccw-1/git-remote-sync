@@ -110,9 +110,18 @@ The utility will:
 
 ```bash
 git-remote-sync -h              # Show help
-git-remote-sync -v              # Show version
+git-remote-sync --version       # Show version, commit hash, and date
+git-remote-sync -v              # Verbose mode (show all git commands)
 git-remote-sync -remote-path string    # Remote path (user@host:/path)
 git-remote-sync -remote-setup string   # Remote setup command
+```
+
+**Version Information:**
+```bash
+$ git-remote-sync --version
+git-remote-sync version 1.4.1
+commit: 3b6a5b2
+date: 2026-06-23 17:25:36 -0400
 ```
 
 ### Usage Examples
