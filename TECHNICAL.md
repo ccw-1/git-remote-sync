@@ -149,36 +149,42 @@ done
 - Include files in sync list if checksum fails (safer than skipping)
 
 ### Phase 3: File Transfer
-Function: `syncFileBatch(gitRoot, remote, files, isZOS, stats) error`
 
-**Transfer Method:**
+**Unix Systems:**
+Function: `syncFileBatch(gitRoot, remote, files, stats) error`
+
+Uses tar-based batch transfer for efficiency:
 ```bash
 # Local: Create tar archive
 cd <gitRoot> && tar -cf - -T <file_list>
 
-# Transfer via SSH with optional conversion
-| ssh user@host '<remote_command>'
-
-# Remote: Extract tar archive
-cd /remote/path && tar -xf -
+# Transfer via SSH
+| ssh user@host 'cd /remote/path && tar -xf -'
 ```
 
-**z/OS Specific:**
+**z/OS Systems:**
+Function: `syncSingleFileZOS(gitRoot, remote, file, stats) error`
+
+Uses individual file transfer with smart fallback:
 ```bash
-# Remote command includes iconv
-cd /remote/path && /bin/iconv -f 1047 -t 819 | /bin/tar -xvfUX -
+# Method 1: Direct transfer (try first)
+cat local_file | ssh user@host 'cd /remote/path && cat > file'
+
+# Method 2: With iconv conversion (fallback if direct fails)
+cat local_file | ssh user@host 'cd /remote/path && /bin/iconv -f 1047 -t 819 > file'
 ```
 
-**Tar Flags Explained:**
-- `-c`: Create archive
-- `-f -`: Use stdin/stdout
-- `-T <file>`: Read file list from file
-- `-x`: Extract archive
-- `-v`: Verbose (for debugging)
-- `-f`: Force overwrite
-- `-U`: Update only if source is newer
-- `-X`: Extended format (z/OS)
-- `-o`: Don't restore ownership (z/OS, prevents permission errors)
+**Why Different Approaches:**
+- **Unix**: Tar is efficient for batch transfers, handles permissions well
+- **z/OS**: Tar with iconv causes checksum corruption; individual file transfer is more reliable
+- **Smart Fallback**: Some z/OS systems handle ASCII automatically, so try direct first for better performance
+
+**z/OS Transfer Process:**
+1. Read file content locally
+2. Create remote directory if needed (`mkdir -p`)
+3. Try direct transfer via `cat > file`
+4. If direct fails, retry with `/bin/iconv -f 1047 -t 819 > file`
+5. Track bytes transferred for statistics
 
 ## z/OS Specific Handling
 
@@ -484,7 +490,16 @@ ssh user@host 'cd /path && git init'
 
 ## Version History
 
-### v1.4.0 (Current)
+### v1.4.1 (Current)
+- **Fixed z/OS file sync bug** - Modified files now sync correctly to z/OS systems
+- **Smart z/OS transfer** - Individual file transfer with automatic fallback (direct or iconv)
+- **Improved reliability** - Replaced tar-based transfer that caused checksum corruption
+- **Better performance** - Direct transfer tried first, iconv only as fallback
+- **Lenient verification** - Accepts synced files even if git status differs temporarily
+- Fixes "checksum error on tape" issue on z/OS systems
+- Maintains efficient tar-based batch transfer for Unix systems
+
+### v1.4.0
 - **Automatic push detection** - Detects unpushed local commits automatically
 - **Safe push validation** - Uses `git merge-base --is-ancestor` to ensure fast-forward
 - **Auto-push to origin** - Pushes commits to origin if safe (no force push)

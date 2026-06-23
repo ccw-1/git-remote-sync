@@ -15,7 +15,7 @@ A utility to keep a remote git repository in sync with your local one via SSH, w
 - **Commit-level sync** - Ensures remote is at the same commit as local using direct ref updates
 - **Optimized network traffic** - Skips sync when already at same commit (zero traffic)
 - **Verbose mode** - Show all git commands with `-v` flag (L: local, R: remote)
-- **z/OS support** - Automatic EBCDIC/ASCII conversion using `iconv` (codepage 1047 to 819)
+- **z/OS support** - Smart file transfer with automatic fallback (direct transfer or iconv conversion)
 - **Complete state sync** - Syncs working tree and commit history
 - **Batch processing** - Efficient transfer of multiple files
 - **Cleanup** - Removes files on remote that don't exist locally
