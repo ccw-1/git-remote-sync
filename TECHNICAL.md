@@ -38,12 +38,14 @@ remote-setup:. ./.env
 ```
 
 **Key-Value Pairs:**
-- `remote-path` (required): SSH connection string in format `user@host:/path`
+- `remote-path` (required): SSH connection string in format `[user@]host:/path`
+  - Supports `user@host:/path` (explicit user and hostname)
+  - Supports `host:/path` (hostname only, useful with SSH config entries)
 - `remote-setup` (optional): Shell command executed before each remote operation
 
 ### Command-Line Flags
 ```bash
--remote-path string    Remote path in format user@host:/path (overrides config file)
+-remote-path string    Remote path in format [user@]host:/path (overrides config file)
 -remote-setup string   Remote setup command (overrides config file)
 -h, -help             Show help message
 -v, -version          Show version information
@@ -54,8 +56,11 @@ remote-setup:. ./.env
 # Use config file only
 git-remote-sync
 
-# Override remote path from config file
+# Override remote path with explicit user
 git-remote-sync -remote-path user@host:/path/to/repo
+
+# Override remote path using SSH config host entry
+git-remote-sync -remote-path myhost:/path/to/repo
 
 # Provide all config via command line (no config file needed)
 git-remote-sync -remote-path user@host:/path -remote-setup ". ./.env"

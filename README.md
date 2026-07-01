@@ -42,12 +42,21 @@ remote-path:userid@hostname:/path/to/remote/repo
 remote-setup:. ./.env
 ```
 
-The `remote-path` line specifies the SSH connection and remote repository path.
+The `remote-path` line specifies the SSH connection and remote repository path. It supports two formats:
+- `userid@hostname:/path/to/remote/repo` - Explicit user and hostname
+- `hostname:/path/to/remote/repo` - Hostname only (useful with SSH config entries that define the user)
+
 The `remote-setup` line is optional and specifies commands to run before each remote operation (e.g., sourcing environment files).
 
-Example with environment setup:
+Example with explicit user and environment setup:
 ```
 remote-path:john@mainframe.example.com:/home/john/myproject
+remote-setup:. ./.env
+```
+
+Example with SSH config host entry (no user specified):
+```
+remote-path:mainframe:/home/john/myproject
 remote-setup:. ./.env
 ```
 
@@ -66,8 +75,11 @@ echo "._remote_sync" >> .gitignore
 You can provide configuration via command-line flags, which override the config file:
 
 ```bash
-# Provide all configuration via command line (no config file needed)
+# Provide all configuration via command line with explicit user
 git-remote-sync -remote-path user@host:/path/to/repo -remote-setup ". ./.env"
+
+# Use SSH config host entry (no user specified)
+git-remote-sync -remote-path myhost:/path/to/repo -remote-setup ". ./.env"
 
 # Override only the remote path from config file
 git-remote-sync -remote-path user@host:/different/path
@@ -130,8 +142,11 @@ date: 2026-06-23 17:25:36 -0400
 # Use config file
 git-remote-sync
 
-# Provide all config via command line
+# Provide all config via command line with explicit user
 git-remote-sync -remote-path user@host:/path -remote-setup ". ./.env"
+
+# Use SSH config host entry (no user in path)
+git-remote-sync -remote-path myhost:/path -remote-setup ". ./.env"
 
 # Override remote path from config file
 git-remote-sync -remote-path user@testhost:/test/path

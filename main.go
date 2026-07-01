@@ -133,14 +133,18 @@ Configuration can be provided via a file named '%s' in the repository root
 or via command-line flags (flags override file settings).
 
 Config file format:
-  remote-path:userid@hostname:/path/to/remote/repo
+  remote-path:[user@]hostname:/path/to/remote/repo
   remote-setup:. ./.env
+
+The remote-path supports two formats:
+  - user@hostname:/path  (explicit user and hostname)
+  - hostname:/path       (hostname only, useful with SSH config entries)
 
 Options:
   -h, -help              Show this help message
   -version               Show version information
   -v                     Verbose mode - show all git commands (prefixed with L: or R:)
-  -remote-path string    Remote path in format user@host:/path (overrides config file)
+  -remote-path string    Remote path in format [user@]host:/path (overrides config file)
   -remote-setup string   Remote setup command (overrides config file)
 
 The remote-setup is optional and allows you to run environment setup commands
@@ -150,8 +154,11 @@ Examples:
   # Use config file
   git-remote-sync
 
-  # Override remote path
+  # Override remote path with explicit user
   git-remote-sync -remote-path user@host:/path/to/repo
+
+  # Override remote path using SSH config host entry
+  git-remote-sync -remote-path myhost:/path/to/repo
 
   # Provide all config via command line
   git-remote-sync -remote-path user@host:/path -remote-setup ". ./.env"
@@ -204,24 +211,9 @@ func readRemoteConfig(path string, cmdRemotePath string, cmdRemoteSetup string) 
 			switch key {
 			case "remote-path":
 				if cmdRemotePath == "" {
-					// Parse user@host:/path
-					pathParts := strings.SplitN(value, ":", 2)
-					if len(pathParts) != 2 {
-						return nil, fmt.Errorf("invalid remote-path format, expected: user@host:/path")
+					if err := parseRemotePath(value, config); err != nil {
+						return nil, err
 					}
-
-					userHost := pathParts[0]
-					remotePath := pathParts[1]
-
-					userHostParts := strings.SplitN(userHost, "@", 2)
-					if len(userHostParts) != 2 {
-						return nil, fmt.Errorf("invalid remote-path format, expected: user@host:/path")
-					}
-
-					config.User = userHostParts[0]
-					config.Host = userHostParts[1]
-					config.Path = remotePath
-					config.FullSpec = value
 				}
 
 			case "remote-setup":
@@ -234,23 +226,9 @@ func readRemoteConfig(path string, cmdRemotePath string, cmdRemoteSetup string) 
 
 	// Override with command-line arguments if provided
 	if cmdRemotePath != "" {
-		pathParts := strings.SplitN(cmdRemotePath, ":", 2)
-		if len(pathParts) != 2 {
-			return nil, fmt.Errorf("invalid --remote-path format, expected: user@host:/path")
+		if err := parseRemotePath(cmdRemotePath, config); err != nil {
+			return nil, err
 		}
-
-		userHost := pathParts[0]
-		remotePath := pathParts[1]
-
-		userHostParts := strings.SplitN(userHost, "@", 2)
-		if len(userHostParts) != 2 {
-			return nil, fmt.Errorf("invalid --remote-path format, expected: user@host:/path")
-		}
-
-		config.User = userHostParts[0]
-		config.Host = userHostParts[1]
-		config.Path = remotePath
-		config.FullSpec = cmdRemotePath
 	}
 
 	if cmdRemoteSetup != "" {
@@ -258,7 +236,7 @@ func readRemoteConfig(path string, cmdRemotePath string, cmdRemoteSetup string) 
 	}
 
 	// Validate that we have required configuration
-	if config.User == "" || config.Host == "" || config.Path == "" {
+	if config.Host == "" || config.Path == "" {
 		if err != nil {
 			return nil, fmt.Errorf("cannot open %s and no --remote-path provided: %w", remoteSyncFile, err)
 		}
@@ -266,6 +244,37 @@ func readRemoteConfig(path string, cmdRemotePath string, cmdRemoteSetup string) 
 	}
 
 	return config, nil
+}
+
+// parseRemotePath parses remote path in format: [user@]host:path
+// Supports both "user@host:path" and "host:path" (where host can be SSH config entry)
+func parseRemotePath(value string, config *RemoteConfig) error {
+	// Split on last colon to separate host part from path
+	pathParts := strings.SplitN(value, ":", 2)
+	if len(pathParts) != 2 {
+		return fmt.Errorf("invalid remote-path format, expected: [user@]host:/path")
+	}
+
+	userHost := pathParts[0]
+	remotePath := pathParts[1]
+
+	// Check if userHost contains @ (user@host format)
+	if strings.Contains(userHost, "@") {
+		userHostParts := strings.SplitN(userHost, "@", 2)
+		if len(userHostParts) != 2 {
+			return fmt.Errorf("invalid remote-path format, expected: [user@]host:/path")
+		}
+		config.User = userHostParts[0]
+		config.Host = userHostParts[1]
+	} else {
+		// No @ sign, treat entire string as host (SSH config entry)
+		config.User = ""
+		config.Host = userHost
+	}
+
+	config.Path = remotePath
+	config.FullSpec = value
+	return nil
 }
 
 func getCurrentBranch() (string, error) {
@@ -283,7 +292,8 @@ func verifyRemote(remote *RemoteConfig) error {
 	// Test SSH connection and check if remote path exists
 	// Don't use buildRemoteCommand here since we need to verify the path exists first
 	testCmd := fmt.Sprintf("test -d %s && echo OK || echo NOTFOUND", remote.Path)
-	cmd := exec.Command("ssh", fmt.Sprintf("%s@%s", remote.User, remote.Host), testCmd)
+	sshTarget := getSSHTarget(remote)
+	cmd := exec.Command("ssh", sshTarget, testCmd)
 	
 	output, err := cmd.CombinedOutput()
 	if err != nil {
@@ -299,6 +309,14 @@ func verifyRemote(remote *RemoteConfig) error {
 	}
 
 	return nil
+}
+
+// getSSHTarget returns the SSH target string in format [user@]host
+func getSSHTarget(remote *RemoteConfig) string {
+	if remote.User != "" {
+		return fmt.Sprintf("%s@%s", remote.User, remote.Host)
+	}
+	return remote.Host
 }
 
 func buildRemoteCommand(remote *RemoteConfig, command string) string {
@@ -375,7 +393,7 @@ func getRemoteHead(remote *RemoteConfig) (string, error) {
 	gitCmd := "git rev-parse HEAD"
 	logCommand("R", gitCmd)
 	remoteCmd := buildRemoteCommand(remote, "git rev-parse HEAD 2>/dev/null || echo NOHEAD")
-	cmd := exec.Command("ssh", fmt.Sprintf("%s@%s", remote.User, remote.Host), remoteCmd)
+	cmd := exec.Command("ssh", getSSHTarget(remote), remoteCmd)
 	output, err := cmd.Output()
 	if err != nil {
 		return "", err
@@ -521,7 +539,7 @@ func syncCommitsViaBundle(gitRoot string, remote *RemoteConfig, branch string, s
 		gitCmd := "git fetch --all -f"
 		logCommand("R", gitCmd)
 		remoteCmd := buildRemoteCommand(remote, "git fetch --all -f >/dev/null 2>/dev/null && echo 'FETCHED' || echo 'FETCHFAILED'")
-		cmd := exec.Command("ssh", fmt.Sprintf("%s@%s", remote.User, remote.Host), remoteCmd)
+		cmd := exec.Command("ssh", getSSHTarget(remote), remoteCmd)
 		output, _ := cmd.Output()
 		
 		fetchResult := strings.TrimSpace(string(output))
@@ -538,7 +556,7 @@ func syncCommitsViaBundle(gitRoot string, remote *RemoteConfig, branch string, s
 	gitCmd := fmt.Sprintf("git update-ref refs/heads/%s %s && git symbolic-ref HEAD refs/heads/%s && git reset --hard %s", branch, localHead, branch, localHead)
 	logCommand("R", gitCmd)
 	remoteCmd := buildRemoteCommand(remote, fmt.Sprintf("git update-ref refs/heads/%s %s >/dev/null 2>&1 && git symbolic-ref HEAD refs/heads/%s >/dev/null 2>&1 && git reset --hard %s >/dev/null 2>&1 && echo 'OK' || echo 'FAILED'", branch, localHead, branch, localHead))
-	cmd := exec.Command("ssh", fmt.Sprintf("%s@%s", remote.User, remote.Host), remoteCmd)
+	cmd := exec.Command("ssh", getSSHTarget(remote), remoteCmd)
 	output, err := cmd.CombinedOutput()
 	
 	outputStr := strings.TrimSpace(string(output))
@@ -620,7 +638,7 @@ func ensureRemoteBranch(remote *RemoteConfig, branch string) error {
 	gitCmd := "git rev-parse --git-dir"
 	logCommand("R", gitCmd)
 	remoteCmd := buildRemoteCommand(remote, "git rev-parse --git-dir > /dev/null 2>&1 && echo OK || echo NOTGIT")
-	cmd := exec.Command("ssh", fmt.Sprintf("%s@%s", remote.User, remote.Host), remoteCmd)
+	cmd := exec.Command("ssh", getSSHTarget(remote), remoteCmd)
 	
 	output, err := cmd.CombinedOutput()
 	if err != nil {
@@ -635,7 +653,7 @@ func ensureRemoteBranch(remote *RemoteConfig, branch string) error {
 	gitCmd = "git fetch --all -f"
 	logCommand("R", gitCmd)
 	remoteCmd = buildRemoteCommand(remote, "git fetch --all -f >/dev/null 2>/dev/null && echo 'FETCHED' || echo 'FETCHFAILED'")
-	cmd = exec.Command("ssh", fmt.Sprintf("%s@%s", remote.User, remote.Host), remoteCmd)
+	cmd = exec.Command("ssh", getSSHTarget(remote), remoteCmd)
 	output, _ = cmd.Output()
 	
 	fetchResult := strings.TrimSpace(string(output))
@@ -649,7 +667,7 @@ func ensureRemoteBranch(remote *RemoteConfig, branch string) error {
 	gitCmd = fmt.Sprintf("git rev-parse --verify %s", branch)
 	logCommand("R", gitCmd)
 	remoteCmd = buildRemoteCommand(remote, fmt.Sprintf("git rev-parse --verify %s >/dev/null 2>/dev/null && echo 'EXISTS' || echo 'NOTEXISTS'", branch))
-	cmd = exec.Command("ssh", fmt.Sprintf("%s@%s", remote.User, remote.Host), remoteCmd)
+	cmd = exec.Command("ssh", getSSHTarget(remote), remoteCmd)
 	output, _ = cmd.Output()
 	
 	branchExists := strings.TrimSpace(string(output)) == "EXISTS"
@@ -659,7 +677,7 @@ func ensureRemoteBranch(remote *RemoteConfig, branch string) error {
 		gitCmd = fmt.Sprintf("git checkout %s", branch)
 		logCommand("R", gitCmd)
 		remoteCmd = buildRemoteCommand(remote, fmt.Sprintf("git checkout %s >/dev/null 2>/dev/null && echo 'OK' || echo 'FAILED'", branch))
-		cmd = exec.Command("ssh", fmt.Sprintf("%s@%s", remote.User, remote.Host), remoteCmd)
+		cmd = exec.Command("ssh", getSSHTarget(remote), remoteCmd)
 		output, _ = cmd.Output()
 		
 		result := strings.TrimSpace(string(output))
@@ -673,7 +691,7 @@ func ensureRemoteBranch(remote *RemoteConfig, branch string) error {
 		gitCmd = fmt.Sprintf("git checkout -b %s", branch)
 		logCommand("R", gitCmd)
 		remoteCmd = buildRemoteCommand(remote, fmt.Sprintf("git checkout -b %s >/dev/null 2>/dev/null && echo 'CREATED' || echo 'FAILED'", branch))
-		cmd = exec.Command("ssh", fmt.Sprintf("%s@%s", remote.User, remote.Host), remoteCmd)
+		cmd = exec.Command("ssh", getSSHTarget(remote), remoteCmd)
 		output, _ = cmd.Output()
 		
 		result := strings.TrimSpace(string(output))
@@ -690,7 +708,7 @@ func ensureRemoteBranch(remote *RemoteConfig, branch string) error {
 func syncFiles(gitRoot string, remote *RemoteConfig, files []string, stats *SyncStats) error {
 	// Check if remote is z/OS
 	remoteCheckCmd := buildRemoteCommand(remote, "which /bin/iconv > /dev/null 2>&1 && echo ZOS || echo UNIX")
-	checkCmd := exec.Command("ssh", fmt.Sprintf("%s@%s", remote.User, remote.Host), remoteCheckCmd)
+	checkCmd := exec.Command("ssh", getSSHTarget(remote), remoteCheckCmd)
 	output, _ := checkCmd.Output()
 	isZOS := strings.TrimSpace(string(output))
 
@@ -755,20 +773,20 @@ func syncSingleFileZOS(gitRoot string, remote *RemoteConfig, file string, stats 
 	remoteDir := filepath.Dir(file)
 	if remoteDir != "." {
 		mkdirCmd := buildRemoteCommand(remote, fmt.Sprintf("mkdir -p %s", remoteDir))
-		mkdirExec := exec.Command("ssh", fmt.Sprintf("%s@%s", remote.User, remote.Host), mkdirCmd)
+		mkdirExec := exec.Command("ssh", getSSHTarget(remote), mkdirCmd)
 		_ = mkdirExec.Run() // Ignore errors if dir exists
 	}
 	
 	// Try direct transfer first (some z/OS systems handle ASCII automatically)
 	transferCmd := buildRemoteCommand(remote, fmt.Sprintf("cat > %s", file))
-	cmd := exec.Command("ssh", fmt.Sprintf("%s@%s", remote.User, remote.Host), transferCmd)
+	cmd := exec.Command("ssh", getSSHTarget(remote), transferCmd)
 	cmd.Stdin = bytes.NewReader(content)
 	
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		// If direct transfer fails, try with iconv for EBCDIC conversion
 		transferCmd = buildRemoteCommand(remote, fmt.Sprintf("/bin/iconv -f 1047 -t 819 > %s", file))
-		cmd = exec.Command("ssh", fmt.Sprintf("%s@%s", remote.User, remote.Host), transferCmd)
+		cmd = exec.Command("ssh", getSSHTarget(remote), transferCmd)
 		cmd.Stdin = bytes.NewReader(content)
 		
 		output, err = cmd.CombinedOutput()
@@ -807,7 +825,7 @@ func filterFilesNeedingSync(gitRoot string, remote *RemoteConfig, files []string
 	checksumCmd := fmt.Sprintf("for f in %s; do if [ -f \"$f\" ]; then shasum \"$f\" 2>/dev/null; fi; done", fileList)
 	
 	remoteCmd := buildRemoteCommand(remote, checksumCmd)
-	cmd := exec.Command("ssh", fmt.Sprintf("%s@%s", remote.User, remote.Host), remoteCmd)
+	cmd := exec.Command("ssh", getSSHTarget(remote), remoteCmd)
 	output, err := cmd.Output()
 	
 	remoteChecksums := make(map[string]string)
@@ -868,7 +886,7 @@ func cleanupRemote(gitRoot string, remote *RemoteConfig, localFiles []string, st
 	// Get list of tracked and untracked (not ignored) files on remote
 	// This matches what we sync: tracked files + untracked files (excluding .gitignore)
 	remoteFilesCmd := buildRemoteCommand(remote, "git ls-files -z && git ls-files --others --exclude-standard -z")
-	cmd := exec.Command("ssh", fmt.Sprintf("%s@%s", remote.User, remote.Host), remoteFilesCmd)
+	cmd := exec.Command("ssh", getSSHTarget(remote), remoteFilesCmd)
 	
 	output, err := cmd.Output()
 	if err != nil {
@@ -911,7 +929,7 @@ func cleanupRemote(gitRoot string, remote *RemoteConfig, localFiles []string, st
 
 		// Build rm command
 		remoteRmCmd := buildRemoteCommand(remote, fmt.Sprintf("rm -f %s", strings.Join(batch, " ")))
-		rmCmd := exec.Command("ssh", fmt.Sprintf("%s@%s", remote.User, remote.Host), remoteRmCmd)
+		rmCmd := exec.Command("ssh", getSSHTarget(remote), remoteRmCmd)
 		
 		if err := rmCmd.Run(); err != nil {
 			stats.Errors = append(stats.Errors, fmt.Sprintf("failed to delete batch %d-%d: %v", i, end, err))
@@ -938,7 +956,7 @@ func verifyGitStatus(gitRoot string, remote *RemoteConfig) error {
 	cmdStr = "git status --porcelain -z"
 	logCommand("R", cmdStr)
 	remoteCmd := buildRemoteCommand(remote, "git status --porcelain -z")
-	cmd = exec.Command("ssh", fmt.Sprintf("%s@%s", remote.User, remote.Host), remoteCmd)
+	cmd = exec.Command("ssh", getSSHTarget(remote), remoteCmd)
 	remoteOutput, err := cmd.Output()
 	if err != nil {
 		return fmt.Errorf("failed to get remote git status: %w", err)
