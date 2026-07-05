@@ -42,9 +42,11 @@ remote-path:userid@hostname:/path/to/remote/repo
 remote-setup:. ./.env
 ```
 
-The `remote-path` line specifies the SSH connection and remote repository path. It supports two formats:
-- `userid@hostname:/path/to/remote/repo` - Explicit user and hostname
-- `hostname:/path/to/remote/repo` - Hostname only (useful with SSH config entries that define the user)
+The `remote-path` line specifies the SSH connection and remote repository path. It supports multiple formats:
+- `userid@hostname:/path/to/remote/repo` - Explicit user, hostname, and path
+- `hostname:/path/to/remote/repo` - Hostname and path (useful with SSH config entries that define the user)
+- `userid@hostname` - Explicit user and hostname (path from SSH config or current directory)
+- `hostname` - Hostname only (useful with SSH config entries that define user and default path)
 
 The `remote-setup` line is optional and specifies commands to run before each remote operation (e.g., sourcing environment files).
 
@@ -57,6 +59,12 @@ remote-setup:. ./.env
 Example with SSH config host entry (no user specified):
 ```
 remote-path:mainframe:/home/john/myproject
+remote-setup:. ./.env
+```
+
+Example with hostname only (using SSH config for user and path):
+```
+remote-path:mainframe
 remote-setup:. ./.env
 ```
 

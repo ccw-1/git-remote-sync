@@ -14,7 +14,7 @@ import (
 
 const (
 	remoteSyncFile = "._remote_sync"
-	version        = "1.4.1"
+	version        = "1.4.2"
 )
 
 var verbose bool
@@ -71,7 +71,19 @@ func main() {
 		fatal("Failed to read remote config: %v", err)
 	}
 
-	fmt.Printf("Remote: %s@%s:%s\n", remote.User, remote.Host, remote.Path)
+	if remote.Path != "" {
+		if remote.User != "" {
+			fmt.Printf("Remote: %s@%s:%s\n", remote.User, remote.Host, remote.Path)
+		} else {
+			fmt.Printf("Remote: %s:%s\n", remote.Host, remote.Path)
+		}
+	} else {
+		if remote.User != "" {
+			fmt.Printf("Remote: %s@%s\n", remote.User, remote.Host)
+		} else {
+			fmt.Printf("Remote: %s\n", remote.Host)
+		}
+	}
 
 	// Get current branch
 	branch, err := getCurrentBranch()
@@ -236,7 +248,8 @@ func readRemoteConfig(path string, cmdRemotePath string, cmdRemoteSetup string) 
 	}
 
 	// Validate that we have required configuration
-	if config.Host == "" || config.Path == "" {
+	// Note: config.Path can be empty if using SSH config with default path
+	if config.Host == "" {
 		if err != nil {
 			return nil, fmt.Errorf("cannot open %s and no --remote-path provided: %w", remoteSyncFile, err)
 		}
@@ -246,23 +259,32 @@ func readRemoteConfig(path string, cmdRemotePath string, cmdRemoteSetup string) 
 	return config, nil
 }
 
-// parseRemotePath parses remote path in format: [user@]host:path
-// Supports both "user@host:path" and "host:path" (where host can be SSH config entry)
+// parseRemotePath parses remote path in format: [user@]host[:path]
+// Supports "user@host:path", "host:path", "user@host", and "host" (where host can be SSH config entry)
 func parseRemotePath(value string, config *RemoteConfig) error {
-	// Split on last colon to separate host part from path
+	// Split on colon to separate host part from path (if path is provided)
 	pathParts := strings.SplitN(value, ":", 2)
-	if len(pathParts) != 2 {
-		return fmt.Errorf("invalid remote-path format, expected: [user@]host:/path")
+	
+	var userHost string
+	var remotePath string
+	
+	if len(pathParts) == 2 {
+		// Format: [user@]host:path
+		userHost = pathParts[0]
+		remotePath = pathParts[1]
+	} else if len(pathParts) == 1 {
+		// Format: [user@]host (no path, will use SSH config or default)
+		userHost = pathParts[0]
+		remotePath = "" // Empty path means use SSH config default or current directory
+	} else {
+		return fmt.Errorf("invalid remote-path format, expected: [user@]host[:path]")
 	}
-
-	userHost := pathParts[0]
-	remotePath := pathParts[1]
 
 	// Check if userHost contains @ (user@host format)
 	if strings.Contains(userHost, "@") {
 		userHostParts := strings.SplitN(userHost, "@", 2)
 		if len(userHostParts) != 2 {
-			return fmt.Errorf("invalid remote-path format, expected: [user@]host:/path")
+			return fmt.Errorf("invalid remote-path format, expected: [user@]host[:path]")
 		}
 		config.User = userHostParts[0]
 		config.Host = userHostParts[1]
@@ -289,23 +311,38 @@ func getCurrentBranch() (string, error) {
 }
 
 func verifyRemote(remote *RemoteConfig) error {
-	// Test SSH connection and check if remote path exists
-	// Don't use buildRemoteCommand here since we need to verify the path exists first
-	testCmd := fmt.Sprintf("test -d %s && echo OK || echo NOTFOUND", remote.Path)
+	// Test SSH connection
 	sshTarget := getSSHTarget(remote)
-	cmd := exec.Command("ssh", sshTarget, testCmd)
 	
-	output, err := cmd.CombinedOutput()
-	if err != nil {
-		return fmt.Errorf("SSH connection failed: %w", err)
-	}
+	// If path is specified, verify it exists
+	if remote.Path != "" {
+		testCmd := fmt.Sprintf("test -d %s && echo OK || echo NOTFOUND", remote.Path)
+		cmd := exec.Command("ssh", sshTarget, testCmd)
+		
+		output, err := cmd.CombinedOutput()
+		if err != nil {
+			return fmt.Errorf("SSH connection failed: %w", err)
+		}
 
-	result := strings.TrimSpace(string(output))
-	if result == "NOTFOUND" {
-		return fmt.Errorf("remote path does not exist: %s", remote.Path)
-	}
-	if result != "OK" {
-		return fmt.Errorf("unexpected response from remote: %s", result)
+		result := strings.TrimSpace(string(output))
+		if result == "NOTFOUND" {
+			return fmt.Errorf("remote path does not exist: %s", remote.Path)
+		}
+		if result != "OK" {
+			return fmt.Errorf("unexpected response from remote: %s", result)
+		}
+	} else {
+		// No path specified, just verify SSH connection works
+		cmd := exec.Command("ssh", sshTarget, "echo OK")
+		output, err := cmd.CombinedOutput()
+		if err != nil {
+			return fmt.Errorf("SSH connection failed: %w", err)
+		}
+		
+		result := strings.TrimSpace(string(output))
+		if result != "OK" {
+			return fmt.Errorf("SSH connection test failed: %s", result)
+		}
 	}
 
 	return nil
@@ -320,10 +357,19 @@ func getSSHTarget(remote *RemoteConfig) string {
 }
 
 func buildRemoteCommand(remote *RemoteConfig, command string) string {
+	var cmdParts []string
+	
 	if remote.Setup != "" {
-		return fmt.Sprintf("%s && cd %s && %s", remote.Setup, remote.Path, command)
+		cmdParts = append(cmdParts, remote.Setup)
 	}
-	return fmt.Sprintf("cd %s && %s", remote.Path, command)
+	
+	if remote.Path != "" {
+		cmdParts = append(cmdParts, fmt.Sprintf("cd %s", remote.Path))
+	}
+	
+	cmdParts = append(cmdParts, command)
+	
+	return strings.Join(cmdParts, " && ")
 }
 
 func syncRepository(gitRoot string, remote *RemoteConfig, branch string, stats *SyncStats) error {

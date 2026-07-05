@@ -38,9 +38,11 @@ remote-setup:. ./.env
 ```
 
 **Key-Value Pairs:**
-- `remote-path` (required): SSH connection string in format `[user@]host:/path`
-  - Supports `user@host:/path` (explicit user and hostname)
-  - Supports `host:/path` (hostname only, useful with SSH config entries)
+- `remote-path` (required): SSH connection string in format `[user@]host[:path]`
+  - Supports `user@host:/path` (explicit user, hostname, and path)
+  - Supports `host:/path` (hostname and path, useful with SSH config entries)
+  - Supports `user@host` (explicit user and hostname, no path)
+  - Supports `host` (hostname only, useful with SSH config entries that define user and default path)
 - `remote-setup` (optional): Shell command executed before each remote operation
 
 ### Command-Line Flags
@@ -495,7 +497,16 @@ ssh user@host 'cd /path && git init'
 
 ## Version History
 
-### v1.4.1 (Current)
+### v1.4.2 (Current)
+- **Hostname-only format support** - Now accepts `hostname` without path for SSH config entries
+- **Flexible remote-path parsing** - Supports `user@host:/path`, `host:/path`, `user@host`, and `host`
+- **SSH config integration** - Works seamlessly with SSH config entries that define default user/path
+- **Improved validation** - Only requires hostname, path is optional
+- **Better error messages** - Clear feedback for configuration issues
+- Fixes "invalid remote-path format" error when using SSH config entries
+- Allows using SSH config defaults for user and working directory
+
+### v1.4.1
 - **Fixed z/OS file sync bug** - Modified files now sync correctly to z/OS systems
 - **Smart z/OS transfer** - Individual file transfer with automatic fallback (direct or iconv)
 - **Improved reliability** - Replaced tar-based transfer that caused checksum corruption
