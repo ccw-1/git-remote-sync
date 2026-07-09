@@ -497,7 +497,14 @@ ssh user@host 'cd /path && git init'
 
 ## Version History
 
-### v1.4.2 (Current)
+### v1.4.3 (Current)
+- **Fixed deleted file handling** - Skip deleted files in getFilesToSync to prevent sync errors
+- **Improved error handling** - No longer attempts to read files marked as deleted by git
+- **Better status parsing** - Extracts and checks git status codes before processing files
+- Fixes "failed to read: no such file or directory" errors for deleted files
+- Prevents unnecessary error messages in sync summary
+
+### v1.4.2
 - **Hostname-only format support** - Now accepts `hostname` without path for SSH config entries
 - **Flexible remote-path parsing** - Supports `user@host:/path`, `host:/path`, `user@host`, and `host`
 - **SSH config integration** - Works seamlessly with SSH config entries that define default user/path

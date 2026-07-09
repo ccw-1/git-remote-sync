@@ -14,7 +14,7 @@ import (
 
 const (
 	remoteSyncFile = "._remote_sync"
-	version        = "1.4.2"
+	version        = "1.4.3"
 )
 
 var verbose bool
@@ -473,7 +473,13 @@ func getFilesToSync(gitRoot string) ([]string, error) {
 		}
 		line := string(entry)
 		// Format: XY filename or XY old -> new
+		status := line[:2]
 		filename := line[3:]
+		
+		// Skip deleted files (they don't exist to sync)
+		if strings.Contains(status, "D") {
+			continue
+		}
 		
 		// Handle renames (old -> new)
 		if strings.Contains(filename, " -> ") {
