@@ -13,6 +13,7 @@ A utility to keep a remote git repository in sync with your local one via SSH, w
 - **Automatic push detection** - Detects unpushed commits and pushes them to origin automatically (v1.4.0+)
 - **Safe push validation** - Only pushes if fast-forward is possible, fails on divergence
 - **Commit-level sync** - Ensures remote is at the same commit as local using direct ref updates
+- **Symlink sync** - Explicitly recreates git-tracked symlinks on the remote (v1.4.4+)
 - **Optimized network traffic** - Skips sync when already at same commit (zero traffic)
 - **Verbose mode** - Show all git commands with `-v` flag (L: local, R: remote)
 - **z/OS support** - Smart file transfer with automatic fallback (direct transfer or iconv conversion)
@@ -121,10 +122,11 @@ The utility will:
 3. Run remote-setup commands (if configured)
 4. Check for unpushed commits and push them to origin if safe (v1.4.0+)
 5. Sync commit history to remote
-6. Sync all tracked and untracked files
-7. Clean up files on remote that don't exist locally
-8. Verify git status consistency
-9. Display a summary
+6. Recreate git-tracked symlinks on the remote (v1.4.4+)
+7. Sync all modified and untracked files
+8. Clean up files on remote that don't exist locally
+9. Verify git status consistency
+10. Display a summary
 
 ### Command-Line Options
 
@@ -330,6 +332,7 @@ Lines starting with `#` are treated as comments and ignored.
 - Remote must have tar (or /bin/tar)
 - Large repositories may take time to sync initially
 - Does not handle git submodules specially
+- Symlinks are recreated unconditionally on every sync (fast, but adds one SSH round-trip)
 
 ## Security Notes
 

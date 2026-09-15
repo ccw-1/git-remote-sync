@@ -15,10 +15,12 @@ main()
   ├── verifyRemote()
   └── syncRepository()
       ├── ensureRemoteBranch()
+      ├── syncCommitsViaBundle()
+      ├── syncSymlinks()           ← v1.4.4
       ├── getFilesToSync()
       └── syncFiles()
           ├── filterFilesNeedingSync()
-          └── syncFileBatch()
+          └── syncFileBatch() / syncSingleFileZOS()
 ```
 
 ## Configuration System
@@ -111,6 +113,32 @@ All remote commands use: `exec.Command("ssh", "user@host", remoteCmd)`
 - Avoid `2>&1` redirection on z/OS to prevent EBCDIC encoding issues in output
 
 ## File Synchronization Strategy
+
+### Phase 0: Symlink Sync (v1.4.4+)
+Function: `syncSymlinks(gitRoot string, remote *RemoteConfig, stats *SyncStats) error`
+
+Runs immediately after `syncCommitsViaBundle`, before the regular file sync.
+
+**Why a dedicated phase:**
+Git stores symlinks as blobs with mode `120000` — the blob content is the symlink target path
+(e.g. `CLAUDE.md`). On z/OS, `git reset --hard` may not correctly recreate these as filesystem
+symlinks because z/OS USS symlink support is limited and some git builds do not handle mode
+`120000` on z/OS. The result is that the file either doesn't exist or is created as a regular
+file containing the target path as text, rather than a real symlink.
+
+**Process:**
+1. Run `git ls-files --stage -z` locally and filter entries with mode `120000`
+2. For each symlink, read the target via `git show :<path>` (blob content = target path)
+3. Build a single SSH command that does, for every symlink:
+   ```bash
+   rm -f <path> && ln -sf <target> <path>
+   ```
+4. Run the whole batch in one SSH round-trip
+
+**Why unconditional recreation:**
+- The total cost is one SSH call regardless of how many symlinks there are
+- Avoids complex "does this symlink already point to the right target?" remote check
+- Idempotent: `ln -sf` overwrites whatever is there
 
 ### Phase 1: File Discovery
 Function: `getFilesToSync(gitRoot string) ([]string, error)`
@@ -497,7 +525,13 @@ ssh user@host 'cd /path && git init'
 
 ## Version History
 
-### v1.4.3 (Current)
+### v1.4.4 (Current)
+- **Symlink sync** - Explicitly recreates all git-tracked symlinks on the remote after commit sync
+- Fixes missing/broken symlinks on z/OS where `git reset --hard` does not restore mode `120000` entries
+- Uses a single SSH round-trip for all symlinks (`rm -f` + `ln -sf` in batch)
+- New function: `syncSymlinks()`, called from `syncRepository()` between commit sync and file sync
+
+### v1.4.3
 - **Fixed deleted file handling** - Skip deleted files in getFilesToSync to prevent sync errors
 - **Improved error handling** - No longer attempts to read files marked as deleted by git
 - **Better status parsing** - Extracts and checks git status codes before processing files

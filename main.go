@@ -14,7 +14,7 @@ import (
 
 const (
 	remoteSyncFile = "._remote_sync"
-	version        = "1.4.3"
+	version        = "1.4.4"
 )
 
 var verbose bool
@@ -382,6 +382,13 @@ func syncRepository(gitRoot string, remote *RemoteConfig, branch string, stats *
 	fmt.Println("\nSyncing commit history...")
 	if err := syncCommitsViaBundle(gitRoot, remote, branch, stats); err != nil {
 		return fmt.Errorf("failed to sync commits: %w", err)
+	}
+
+	// Sync symlinks tracked in the git index (git reset --hard may not recreate
+	// them correctly on z/OS where symlink support is limited)
+	fmt.Println("\nSyncing symlinks...")
+	if err := syncSymlinks(gitRoot, remote, stats); err != nil {
+		return fmt.Errorf("failed to sync symlinks: %w", err)
 	}
 
 	// Get list of modified and untracked files
@@ -754,6 +761,85 @@ func ensureRemoteBranch(remote *RemoteConfig, branch string) error {
 		}
 	}
 
+	return nil
+}
+
+// syncSymlinks reads all symlinks from the local git index (mode 120000) and
+// recreates them on the remote via SSH.  git reset --hard may not restore
+// symlinks correctly on z/OS, so we do it explicitly.
+func syncSymlinks(gitRoot string, remote *RemoteConfig, stats *SyncStats) error {
+	// git ls-files --stage lists entries with their mode; mode 120000 = symlink
+	cmdStr := "git ls-files --stage -z"
+	logCommand("L", cmdStr)
+	cmd := exec.Command("git", "ls-files", "--stage", "-z")
+	cmd.Dir = gitRoot
+	output, err := cmd.Output()
+	if err != nil {
+		return fmt.Errorf("failed to list staged files: %w", err)
+	}
+
+	type symlink struct {
+		path   string
+		target string
+	}
+	var symlinks []symlink
+
+	for _, entry := range bytes.Split(output, []byte{0}) {
+		if len(entry) == 0 {
+			continue
+		}
+		// Format: "<mode> <hash> <stage>\t<path>"
+		line := string(entry)
+		tab := strings.IndexByte(line, '\t')
+		if tab < 0 {
+			continue
+		}
+		meta := line[:tab]
+		path := line[tab+1:]
+		fields := strings.Fields(meta)
+		if len(fields) < 1 || fields[0] != "120000" {
+			continue
+		}
+		// Read the symlink target from the blob (it's just the target path as text)
+		readCmd := exec.Command("git", "show", ":"+path)
+		readCmd.Dir = gitRoot
+		targetBytes, err := readCmd.Output()
+		if err != nil {
+			stats.Errors = append(stats.Errors, fmt.Sprintf("symlink %s: failed to read target: %v", path, err))
+			continue
+		}
+		symlinks = append(symlinks, symlink{path: path, target: strings.TrimSpace(string(targetBytes))})
+	}
+
+	if len(symlinks) == 0 {
+		fmt.Println("✓ No symlinks to sync")
+		return nil
+	}
+
+	fmt.Printf("Syncing %d symlink(s)...\n", len(symlinks))
+
+	// Build a single remote command that recreates all symlinks
+	var cmds []string
+	for _, sl := range symlinks {
+		dir := filepath.Dir(sl.path)
+		if dir != "." {
+			cmds = append(cmds, fmt.Sprintf("mkdir -p %s", dir))
+		}
+		// Remove whatever is there (regular file from a bad reset, or stale symlink)
+		cmds = append(cmds, fmt.Sprintf("rm -f %s && ln -sf %s %s", sl.path, sl.target, sl.path))
+	}
+	remoteScript := strings.Join(cmds, " && ")
+	remoteCmd := buildRemoteCommand(remote, remoteScript+" && echo OK")
+	sshCmd := exec.Command("ssh", getSSHTarget(remote), remoteCmd)
+	sshOutput, err := sshCmd.CombinedOutput()
+	if err != nil || !strings.Contains(strings.TrimSpace(string(sshOutput)), "OK") {
+		return fmt.Errorf("failed to recreate symlinks on remote: %v\nOutput: %s", err, string(sshOutput))
+	}
+
+	for _, sl := range symlinks {
+		fmt.Printf("✓ Symlink: %s -> %s\n", sl.path, sl.target)
+		stats.FilesTransferred++
+	}
 	return nil
 }
 
