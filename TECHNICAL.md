@@ -16,6 +16,7 @@ main()
   └── syncRepository()
       ├── ensureRemoteBranch()
       ├── syncCommitsViaBundle()
+      ├── discardRemoteOnlyChanges() ← v1.4.5
       ├── syncSymlinks()           ← v1.4.4
       ├── getFilesToSync()
       └── syncFiles()
@@ -525,7 +526,15 @@ ssh user@host 'cd /path && git init'
 
 ## Version History
 
-### v1.4.4 (Current)
+### v1.4.5 (Current)
+- **Remote-only change revert** - Reverts tracked files modified on the remote that are clean locally
+- Compares `git status --porcelain -z` maps from both sides to find remote-only changes
+- Reverts only those files via `git checkout HEAD -- <files>` (shell-quoted, batched)
+- Falls back to full `git reset --hard HEAD` if the targeted revert fails (e.g. staged-new files)
+- Fixes sync failure (`git status mismatch`) when test runs on the remote dirty tracked files
+- Preserves the checksum-skip optimization: files modified on both sides are untouched
+
+### v1.4.4
 - **Symlink sync** - Explicitly recreates all git-tracked symlinks on the remote after commit sync
 - Fixes missing/broken symlinks on z/OS where `git reset --hard` does not restore mode `120000` entries
 - Uses a single SSH round-trip for all symlinks (`rm -f` + `ln -sf` in batch)

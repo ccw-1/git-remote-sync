@@ -122,11 +122,12 @@ The utility will:
 3. Run remote-setup commands (if configured)
 4. Check for unpushed commits and push them to origin if safe (v1.4.0+)
 5. Sync commit history to remote
-6. Recreate git-tracked symlinks on the remote (v1.4.4+)
-7. Sync all modified and untracked files
-8. Clean up files on remote that don't exist locally
-9. Verify git status consistency
-10. Display a summary
+6. Revert remote-only changes (files modified on remote but clean locally, v1.4.5+)
+7. Recreate git-tracked symlinks on the remote (v1.4.4+)
+8. Sync all modified and untracked files
+9. Clean up files on remote that don't exist locally
+10. Verify git status consistency
+11. Display a summary
 
 ### Command-Line Options
 

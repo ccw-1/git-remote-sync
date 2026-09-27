@@ -14,7 +14,7 @@ import (
 
 const (
 	remoteSyncFile = "._remote_sync"
-	version        = "1.4.4"
+	version        = "1.4.5"
 )
 
 var verbose bool
@@ -384,6 +384,18 @@ func syncRepository(gitRoot string, remote *RemoteConfig, branch string, stats *
 		return fmt.Errorf("failed to sync commits: %w", err)
 	}
 
+	// Revert files modified on the remote that are clean locally, so the
+	// remote ends up exactly matching local state. The remote may have
+	// modified tracked files that are clean locally (e.g. test artifacts
+	// changed by test runs on the remote). Those would otherwise survive
+	// the sync: getFilesToSync only transfers locally-modified files and
+	// cleanupRemote only deletes files absent locally, which makes the
+	// final verifyGitStatus check fail with a git status mismatch.
+	fmt.Println("\nReverting remote-only changes...")
+	if err := discardRemoteOnlyChanges(gitRoot, remote); err != nil {
+		return fmt.Errorf("failed to revert remote-only changes: %w", err)
+	}
+
 	// Sync symlinks tracked in the git index (git reset --hard may not recreate
 	// them correctly on z/OS where symlink support is limited)
 	fmt.Println("\nSyncing symlinks...")
@@ -624,6 +636,148 @@ func syncCommitsViaBundle(gitRoot string, remote *RemoteConfig, branch string, s
 	}
 
 	fmt.Printf("✓ Synced commits to: %s\n", localHead[:8])
+	return nil
+}
+
+// discardRemoteOnlyChanges reverts tracked files that are modified on the
+// remote but clean locally (e.g. test artifacts changed by test runs on the
+// remote). Only those files are touched, so files modified on both sides keep
+// their content and are still skipped by the checksum comparison in syncFiles
+// when they already match. Untracked files are left alone here;
+// cleanupRemote removes extraneous ones later.
+func discardRemoteOnlyChanges(gitRoot string, remote *RemoteConfig) error {
+	localStatus, err := getLocalStatusMap(gitRoot)
+	if err != nil {
+		return fmt.Errorf("failed to get local git status: %w", err)
+	}
+
+	remoteStatus, err := getRemoteStatusMap(remote)
+	if err != nil {
+		return fmt.Errorf("failed to get remote git status: %w", err)
+	}
+
+	var remoteOnly []string
+	for file, status := range remoteStatus {
+		if status == "??" {
+			// Untracked files are handled by cleanupRemote
+			continue
+		}
+		if _, ok := localStatus[file]; !ok {
+			remoteOnly = append(remoteOnly, file)
+		}
+	}
+
+	if len(remoteOnly) == 0 {
+		fmt.Println("✓ No remote-only changes")
+		return nil
+	}
+
+	fmt.Printf("Found %d remote-only change(s), reverting...\n", len(remoteOnly))
+	if err := checkoutRemoteFiles(remote, remoteOnly); err != nil {
+		fmt.Printf("⚠ Targeted revert failed (%v), falling back to full reset\n", err)
+		return resetRemoteWorkingTree(remote)
+	}
+
+	fmt.Printf("✓ Reverted %d remote-only file(s)\n", len(remoteOnly))
+	return nil
+}
+
+// parsePorcelainZ parses null-terminated `git status --porcelain -z` output
+// into a map of filename -> two-letter status code. Renames ("old -> new")
+// are recorded under the new filename.
+func parsePorcelainZ(output []byte) map[string]string {
+	files := make(map[string]string)
+	for _, entry := range bytes.Split(output, []byte{0}) {
+		if len(entry) < 4 {
+			continue
+		}
+		status := string(entry[:2])
+		filename := string(entry[3:])
+		if idx := strings.Index(filename, " -> "); idx >= 0 {
+			filename = filename[idx+4:]
+		}
+		files[filename] = status
+	}
+	return files
+}
+
+func getLocalStatusMap(gitRoot string) (map[string]string, error) {
+	cmdStr := "git status --porcelain -z"
+	logCommand("L", cmdStr)
+	cmd := exec.Command("git", "status", "--porcelain", "-z")
+	cmd.Dir = gitRoot
+	output, err := cmd.Output()
+	if err != nil {
+		return nil, err
+	}
+	return parsePorcelainZ(output), nil
+}
+
+func getRemoteStatusMap(remote *RemoteConfig) (map[string]string, error) {
+	gitCmd := "git status --porcelain -z"
+	logCommand("R", gitCmd)
+	remoteCmd := buildRemoteCommand(remote, "git status --porcelain -z")
+	cmd := exec.Command("ssh", getSSHTarget(remote), remoteCmd)
+	output, err := cmd.Output()
+	if err != nil {
+		return nil, err
+	}
+	return parsePorcelainZ(output), nil
+}
+
+// checkoutRemoteFiles restores the given paths on the remote to HEAD
+// (`git checkout HEAD -- <paths>` reverts both staged and unstaged changes
+// and restores deleted working tree files). Paths are shell-quoted to handle
+// spaces and special characters.
+func checkoutRemoteFiles(remote *RemoteConfig, files []string) error {
+	batchSize := 50
+	for i := 0; i < len(files); i += batchSize {
+		end := i + batchSize
+		if end > len(files) {
+			end = len(files)
+		}
+		batch := files[i:end]
+
+		quoted := make([]string, len(batch))
+		for j, f := range batch {
+			quoted[j] = shellQuote(f)
+		}
+
+		gitCmd := fmt.Sprintf("git checkout HEAD -- %s", strings.Join(quoted, " "))
+		logCommand("R", gitCmd)
+		remoteCmd := buildRemoteCommand(remote, gitCmd+" >/dev/null 2>/dev/null && echo 'OK' || echo 'FAILED'")
+		cmd := exec.Command("ssh", getSSHTarget(remote), remoteCmd)
+		output, err := cmd.CombinedOutput()
+
+		outputStr := strings.TrimSpace(string(output))
+		if err != nil || !strings.Contains(outputStr, "OK") {
+			return fmt.Errorf("failed to revert batch %d-%d: %v\nOutput: %s", i, end, err, outputStr)
+		}
+	}
+	return nil
+}
+
+// shellQuote quotes a string for safe use as a single shell word.
+func shellQuote(s string) string {
+	return "'" + strings.ReplaceAll(s, "'", "'\\''") + "'"
+}
+
+// resetRemoteWorkingTree discards all working tree changes to tracked files
+// on the remote (git reset --hard HEAD). Used as a fallback when the
+// targeted revert of remote-only files fails.
+func resetRemoteWorkingTree(remote *RemoteConfig) error {
+	gitCmd := "git reset --hard HEAD"
+	logCommand("R", gitCmd)
+	remoteCmd := buildRemoteCommand(remote, "git reset --hard HEAD >/dev/null 2>/dev/null && echo 'OK' || echo 'FAILED'")
+	cmd := exec.Command("ssh", getSSHTarget(remote), remoteCmd)
+	output, err := cmd.CombinedOutput()
+
+	outputStr := strings.TrimSpace(string(output))
+	if err != nil || !strings.Contains(outputStr, "OK") {
+		return fmt.Errorf("failed to reset remote working tree: %v\nOutput: %s", err, outputStr)
+	}
+
+	fmt.Println("✓ Remote working tree reset to HEAD")
 	return nil
 }
 
