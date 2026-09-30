@@ -10,6 +10,8 @@ A utility to keep a remote git repository in sync with your local one via SSH, w
 ## Features
 
 - **Direct SSH synchronization** - No need for git push/pull
+- **Flexible configuration** - Configure via git config properties (`remote-sync.*`), config file (`._remote_sync`), or command-line flags
+- **Built-in MCP Server** - Model Context Protocol server (`git-remote-sync-mcp` or `-mcp`) for seamless AI agent/harness integration
 - **Automatic push detection** - Detects unpushed commits and pushes them to origin automatically (v1.4.0+)
 - **Safe push validation** - Only pushes if fast-forward is possible, fails on divergence
 - **Commit-level sync** - Ensures remote is at the same commit as local using direct ref updates
@@ -26,15 +28,33 @@ A utility to keep a remote git repository in sync with your local one via SSH, w
 
 ```bash
 cd git-remote-sync
-go build -o git-remote-sync
+go build -o git-remote-sync .
+ln -sf git-remote-sync git-remote-sync-mcp
 sudo cp git-remote-sync /usr/local/bin/  # Optional: install system-wide
 ```
 
 ## Configuration
 
-Configuration can be provided via a config file, command-line flags, or both (flags override file settings).
+Configuration can be provided via command-line flags, a config file (`._remote_sync`), git config properties (local or global), or any combination.
 
-### Option 1: Configuration File
+### Option 1: Git Config Properties
+
+You can configure git properties in local repository config (`.git/config`) or globally (`~/.gitconfig`):
+
+```bash
+# Set for the current repository (local)
+git config remote-sync.remote-path "userid@hostname:/path/to/remote/repo"
+git config remote-sync.remote-setup ". ./.env"
+
+# Or set globally
+git config --global remote-sync.remote-setup ". ~/.env"
+```
+
+Supported git config properties:
+- `remote-sync.remote-path`: Remote connection string in format `[user@]host[:path]`
+- `remote-sync.remote-setup`: Optional setup/environment command executed before remote operations
+
+### Option 2: Configuration File
 
 Create a file named `._remote_sync` in your git repository root (this file should NOT be committed to git):
 
@@ -79,7 +99,7 @@ Add to `.gitignore`:
 echo "._remote_sync" >> .gitignore
 ```
 
-### Option 2: Command-Line Flags
+### Option 3: Command-Line Flags
 
 You can provide configuration via command-line flags, which override the config file:
 
@@ -97,12 +117,15 @@ git-remote-sync -remote-path user@host:/different/path
 git-remote-sync -remote-setup ". /custom/setup.sh"
 ```
 
-### Option 3: Combination
+### Option 4: Precedence & Combination
 
-Use a config file for defaults and override specific settings with flags:
+When settings are present in multiple sources, precedence is resolved in order (highest to lowest):
+1. **Command-line flags** (`-remote-path`, `-remote-setup`)
+2. **Config file** (`._remote_sync`)
+3. **Git config properties** (`remote-sync.remote-path`, `remote-sync.remote-setup` — local overrides global)
 
 ```bash
-# Config file has remote-path, override setup command
+# Git config provides default remote-path, override setup command on CLI
 git-remote-sync -remote-setup ". /tmp/test-env"
 ```
 
@@ -134,10 +157,68 @@ The utility will:
 ```bash
 git-remote-sync -h              # Show help
 git-remote-sync --version       # Show version, commit hash, and date
+git-remote-sync -mcp            # Run as Model Context Protocol (MCP) server over stdio
 git-remote-sync -v              # Verbose mode (show all git commands)
 git-remote-sync -remote-path string    # Remote path (user@host:/path)
 git-remote-sync -remote-setup string   # Remote setup command
 ```
+
+### Model Context Protocol (MCP) Server
+
+`git-remote-sync` can be run directly as a Model Context Protocol (MCP) server over standard I/O (stdio JSON-RPC 2.0). This enables AI agents, coding assistants, and automated harnesses (such as Bob, Claude Desktop, Cursor, OpenCode, VS Code MCP extensions, etc.) to inspect configuration and synchronize repositories programmatically without running shell commands.
+
+The server launches in MCP mode when invoked via the `git-remote-sync-mcp` executable (or symlink) or when passed the `-mcp` flag (`git-remote-sync -mcp`).
+
+#### Tools Exposed to AI Agents
+
+| Tool | Purpose | Parameters |
+|---|---|---|
+| `git_remote_sync` | Triggers synchronization of the local repo state to the remote system. | `repo_path` (string, optional - defaults to current working directory)<br>`remote_path` (string, optional - overrides config/git property)<br>`remote_setup` (string, optional - overrides setup command)<br>`verbose` (boolean, optional - show command trace) |
+| `git_remote_sync_config_get` | Inspects the effective repository sync config, reporting resolved values and detailing what was found in `._remote_sync`, local `.git/config`, and global `~/.gitconfig`. | `repo_path` (string, optional) |
+| `git_remote_sync_config_set` | Sets `remote-sync.remote-path` or `remote-sync.remote-setup` in git config. | `repo_path` (string, optional)<br>`remote_path` (string, optional)<br>`remote_setup` (string, optional)<br>`global` (boolean, default `false` - sets in `~/.gitconfig` if `true`) |
+| `git_remote_sync_help` | Returns a complete quick-reference guide and configuration syntax for the agent. | *(none)* |
+
+#### AI Agent & Harness Configuration Examples
+
+##### 1. Bob / IBM Bob (`.bob/mcp.json` or `~/.bob/mcp.json`)
+```json
+{
+  "mcpServers": {
+    "git-remote-sync": {
+      "command": "/home/knoppix/go-dev/git-remote-sync/git-remote-sync-mcp",
+      "args": []
+    }
+  }
+}
+```
+
+##### 2. Claude Desktop (`claude_desktop_config.json`)
+```json
+{
+  "mcpServers": {
+    "git-remote-sync": {
+      "command": "/usr/local/bin/git-remote-sync-mcp",
+      "args": []
+    }
+  }
+}
+```
+
+##### 3. OpenCode (`opencode.json`)
+```json
+{
+  "mcp": {
+    "git-remote-sync": {
+      "type": "local",
+      "command": ["git-remote-sync-mcp"],
+      "enabled": true
+    }
+  }
+}
+```
+
+##### 4. Generic Stdio Harness / Subprocess Spawner
+Launch command: `git-remote-sync-mcp` (or `git-remote-sync -mcp`) with standard JSON-RPC 2.0 lines on stdin/stdout. Logging is isolated to stderr.
 
 **Version Information:**
 ```bash
@@ -150,7 +231,15 @@ date: 2026-06-23 17:25:36 -0400
 ### Usage Examples
 
 ```bash
-# Use config file
+# Configure once via git config (local repository)
+git config remote-sync.remote-path "user@host:/path/to/repo"
+git config remote-sync.remote-setup ". ./.env"
+git-remote-sync
+
+# Configure default setup globally across all repos
+git config --global remote-sync.remote-setup ". ~/.env"
+
+# Use existing ._remote_sync config file or git config
 git-remote-sync
 
 # Provide all config via command line with explicit user
@@ -247,8 +336,25 @@ Please resolve manually:
 
 ## Example Workflow
 
+### Workflow A: Using Git Config Properties (Recommended)
+
 ```bash
-# 1. Set up remote configuration
+# 1. Set remote path and environment setup in git config
+git config remote-sync.remote-path user@remote:/home/user/project
+git config remote-sync.remote-setup ". ./.env"
+
+# 2. Make changes locally
+echo "new feature" > feature.txt
+git add feature.txt
+
+# 3. Sync to remote (without git push)
+git-remote-sync
+```
+
+### Workflow B: Using `._remote_sync` Config File
+
+```bash
+# 1. Set up remote configuration file
 cat > ._remote_sync << EOF
 remote-path:user@remote:/home/user/project
 remote-setup:. ./.env
@@ -318,12 +424,34 @@ Ensure the remote path exists and is a git repository:
 ssh user@remote 'test -d /path/to/repo/.git && echo OK'
 ```
 
-## Configuration File Format
+## Configuration Reference
+
+### Git Config Properties
+
+| Property | Description | Format / Example | Scope |
+|---|---|---|---|
+| `remote-sync.remote-path` | Target SSH user, host, and remote repository path. | `[user@]host[:path]`<br>`ccw@pok56:/home/ccw/delve`<br>`pok56:/home/ccw/delve`<br>`pok56` | Local (`--local`) or Global (`--global`) |
+| `remote-sync.remote-setup` | Setup command executed before remote git operations (e.g. environment sourcing). | `string`<br>`. ./.env`<br>`. ~/.env` | Local (`--local`) or Global (`--global`) |
+
+Commands:
+```bash
+# Local to repo (.git/config)
+git config remote-sync.remote-path "user@host:/path/to/repo"
+git config remote-sync.remote-setup ". ./.env"
+
+# Global (~/.gitconfig)
+git config --global remote-sync.remote-setup ". ~/.env"
+
+# Inspect current configuration
+git config --get-regexp remote-sync
+```
+
+### Configuration File Format (`._remote_sync`)
 
 The `._remote_sync` file supports the following keys:
 
-- `remote-path` (required): SSH connection string in format `user@host:/path`
-- `remote-setup` (optional): Shell command to run before each remote operation
+- `remote-path`: SSH connection string in format `[user@]host[:path]`
+- `remote-setup`: Shell command to run before each remote operation
 
 Lines starting with `#` are treated as comments and ignored.
 

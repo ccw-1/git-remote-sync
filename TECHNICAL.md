@@ -28,12 +28,27 @@ main()
 
 ### Configuration Sources
 Configuration can be provided via:
-1. **Config file** (default): `._remote_sync` in repository root (should be in `.gitignore`)
-2. **Command-line flags**: Override or replace config file settings
-3. **Combination**: Flags override file settings
+1. **Command-line flags**: Highest priority (`-remote-path`, `-remote-setup`)
+2. **Config file**: `._remote_sync` in repository root (should be in `.gitignore`)
+3. **Git config properties**: Local (`git config ...`) or global (`git config --global ...`)
+
+### Git Config Properties
+Set via standard `git config`:
+```bash
+# Local to repository (.git/config)
+git config remote-sync.remote-path "userid@hostname:/path/to/remote/repo"
+git config remote-sync.remote-setup ". ./.env"
+
+# Or global (~/.gitconfig)
+git config --global remote-sync.remote-setup ". ~/.env"
+```
+
+**Keys:**
+- `remote-sync.remote-path`: SSH connection string in format `[user@]host[:path]`
+- `remote-sync.remote-setup`: Shell command executed before each remote operation
 
 ### Configuration File Format
-Location: `._remote_sync` in repository root (optional if using command-line flags)
+Location: `._remote_sync` in repository root (optional if using git config or command-line flags)
 
 ```
 remote-path:userid@hostname:/path/to/remote/repo
@@ -41,24 +56,24 @@ remote-setup:. ./.env
 ```
 
 **Key-Value Pairs:**
-- `remote-path` (required): SSH connection string in format `[user@]host[:path]`
+- `remote-path`: SSH connection string in format `[user@]host[:path]`
   - Supports `user@host:/path` (explicit user, hostname, and path)
   - Supports `host:/path` (hostname and path, useful with SSH config entries)
   - Supports `user@host` (explicit user and hostname, no path)
   - Supports `host` (hostname only, useful with SSH config entries that define user and default path)
-- `remote-setup` (optional): Shell command executed before each remote operation
+- `remote-setup`: Shell command executed before each remote operation
 
 ### Command-Line Flags
 ```bash
--remote-path string    Remote path in format [user@]host:/path (overrides config file)
--remote-setup string   Remote setup command (overrides config file)
+-remote-path string    Remote path in format [user@]host[:path] (overrides config file / git config)
+-remote-setup string   Remote setup command (overrides config file / git config)
 -h, -help             Show help message
 -v, -version          Show version information
 ```
 
 **Examples:**
 ```bash
-# Use config file only
+# Use git config or config file
 git-remote-sync
 
 # Override remote path with explicit user
@@ -67,7 +82,7 @@ git-remote-sync -remote-path user@host:/path/to/repo
 # Override remote path using SSH config host entry
 git-remote-sync -remote-path myhost:/path/to/repo
 
-# Provide all config via command line (no config file needed)
+# Provide all config via command line (no config file or git config needed)
 git-remote-sync -remote-path user@host:/path -remote-setup ". ./.env"
 
 # Override only setup command
@@ -76,17 +91,19 @@ git-remote-sync -remote-setup ". /custom/setup.sh"
 
 ### Configuration Parsing
 - Implemented in `readRemoteConfig(path, cmdRemotePath, cmdRemoteSetup)`
-- Reads from file first (if exists)
-- Command-line flags override file settings
-- Supports comments (lines starting with `#`)
+- Reads from `._remote_sync` file if present
+- Reads from `git config remote-sync.*` properties via `getGitConfig`
+- Command-line flags override both file and git config
+- Supports comments (lines starting with `#`) in config file
 - Ignores empty lines
-- Uses `strings.SplitN(line, ":", 2)` to parse key-value pairs
+- Uses `strings.SplitN(line, ":", 2)` to parse file key-value pairs
 - Validates required fields before returning
 
 **Priority Order:**
 1. Command-line flags (highest priority)
-2. Config file settings
-3. Error if neither provides required `remote-path`
+2. Config file settings (`._remote_sync`)
+3. Git config properties (`remote-sync.remote-path`, `remote-sync.remote-setup`)
+4. Error if none provides required `remote-path`
 
 ## Remote Command Execution
 

@@ -14,7 +14,7 @@ import (
 
 const (
 	remoteSyncFile = "._remote_sync"
-	version        = "1.4.5"
+	version        = "1.5.0"
 )
 
 var verbose bool
@@ -35,14 +35,26 @@ type SyncStats struct {
 }
 
 func main() {
+	// If invoked as git-remote-sync-mcp or with --mcp flag, start MCP server mode
+	if filepath.Base(os.Args[0]) == "git-remote-sync-mcp" {
+		runMCP()
+		return
+	}
+
 	// Define command-line flags
 	remotePath := flag.String("remote-path", "", "Remote path in format user@host:/path (overrides config file)")
 	remoteSetup := flag.String("remote-setup", "", "Remote setup command (overrides config file)")
 	showHelp := flag.Bool("h", false, "Show help message")
 	showVersion := flag.Bool("version", false, "Show version information")
 	verboseFlag := flag.Bool("v", false, "Verbose mode - show all git commands")
+	mcpFlag := flag.Bool("mcp", false, "Run as Model Context Protocol (MCP) server over stdio")
 	
 	flag.Parse()
+
+	if *mcpFlag {
+		runMCP()
+		return
+	}
 
 	verbose = *verboseFlag
 
@@ -141,29 +153,48 @@ Usage: git-remote-sync [options]
 Syncs a local git repository with a remote one via SSH, maintaining the exact
 state including modified files, untracked files, and current branch.
 
-Configuration can be provided via a file named '%s' in the repository root
-or via command-line flags (flags override file settings).
+Configuration can be provided via command-line flags, a config file named '%s'
+in the repository root, or git config properties (local or global).
+
+Precedence (highest to lowest):
+  1. Command-line flags (-remote-path, -remote-setup)
+  2. Config file (%s)
+  3. Git config properties (local repo or global git config)
+
+Git config properties:
+  git config remote-sync.remote-path "[user@]hostname:/path/to/remote/repo"
+  git config remote-sync.remote-setup ". ./.env"
+  # Or globally:
+  git config --global remote-sync.remote-setup ". ~/.env"
 
 Config file format:
   remote-path:[user@]hostname:/path/to/remote/repo
   remote-setup:. ./.env
 
-The remote-path supports two formats:
-  - user@hostname:/path  (explicit user and hostname)
-  - hostname:/path       (hostname only, useful with SSH config entries)
+The remote-path supports:
+  - user@hostname:/path  (explicit user, hostname, and path)
+  - hostname:/path       (hostname and path, useful with SSH config entries)
+  - user@hostname        (user and hostname, default path)
+  - hostname             (hostname only, useful with SSH config entries)
 
 Options:
   -h, -help              Show this help message
   -version               Show version information
+  -mcp                   Run as Model Context Protocol (MCP) server over stdio
   -v                     Verbose mode - show all git commands (prefixed with L: or R:)
-  -remote-path string    Remote path in format [user@]host:/path (overrides config file)
-  -remote-setup string   Remote setup command (overrides config file)
+  -remote-path string    Remote path in format [user@]host[:path] (overrides config file/git config)
+  -remote-setup string   Remote setup command (overrides config file/git config)
 
 The remote-setup is optional and allows you to run environment setup commands
 before each remote operation (e.g., sourcing environment files).
 
 Examples:
-  # Use config file
+  # Use git config or config file
+  git-remote-sync
+
+  # Set git config once for the repository
+  git config remote-sync.remote-path "user@host:/path/to/repo"
+  git config remote-sync.remote-setup ". ./.env"
   git-remote-sync
 
   # Override remote path with explicit user
@@ -177,7 +208,7 @@ Examples:
 
 The utility handles EBCDIC/ASCII conversion for z/OS systems automatically
 using iconv (codepage 1047 to 819).
-`, version, remoteSyncFile)
+`, version, remoteSyncFile, remoteSyncFile)
 }
 
 func logCommand(location string, command string) {
@@ -197,13 +228,30 @@ func getGitRoot() (string, error) {
 	return strings.TrimSpace(string(output)), nil
 }
 
+// getGitConfig retrieves a git config value (checks local then global automatically)
+func getGitConfig(key string) string {
+	cmdStr := fmt.Sprintf("git config %s", key)
+	logCommand("L", cmdStr)
+	cmd := exec.Command("git", "config", key)
+	output, err := cmd.Output()
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(output))
+}
+
 func readRemoteConfig(path string, cmdRemotePath string, cmdRemoteSetup string) (*RemoteConfig, error) {
 	config := &RemoteConfig{}
 	
-	// Try to read from file first (if it exists)
+	var fileRemotePath string
+	var fileRemoteSetup string
+	var fileFound bool
+
+	// 1. Try to read from config file first (if it exists)
 	file, err := os.Open(path)
 	if err == nil {
 		defer file.Close()
+		fileFound = true
 		scanner := bufio.NewScanner(file)
 		
 		for scanner.Scan() {
@@ -222,38 +270,49 @@ func readRemoteConfig(path string, cmdRemotePath string, cmdRemoteSetup string) 
 
 			switch key {
 			case "remote-path":
-				if cmdRemotePath == "" {
-					if err := parseRemotePath(value, config); err != nil {
-						return nil, err
-					}
-				}
-
+				fileRemotePath = value
 			case "remote-setup":
-				if cmdRemoteSetup == "" {
-					config.Setup = value
-				}
+				fileRemoteSetup = value
 			}
 		}
 	}
 
-	// Override with command-line arguments if provided
+	// 2. Read git config properties as fallback (checked if not in file and not in cmdline)
+	gitRemotePath := getGitConfig("remote-sync.remote-path")
+	gitRemoteSetup := getGitConfig("remote-sync.remote-setup")
+
+	// Determine effective remotePath: cmdline > file > git config
+	var effectiveRemotePath string
 	if cmdRemotePath != "" {
-		if err := parseRemotePath(cmdRemotePath, config); err != nil {
+		effectiveRemotePath = cmdRemotePath
+	} else if fileRemotePath != "" {
+		effectiveRemotePath = fileRemotePath
+	} else if gitRemotePath != "" {
+		effectiveRemotePath = gitRemotePath
+	}
+
+	if effectiveRemotePath != "" {
+		if err := parseRemotePath(effectiveRemotePath, config); err != nil {
 			return nil, err
 		}
 	}
 
+	// Determine effective remoteSetup: cmdline > file > git config
 	if cmdRemoteSetup != "" {
 		config.Setup = cmdRemoteSetup
+	} else if fileRemoteSetup != "" {
+		config.Setup = fileRemoteSetup
+	} else if gitRemoteSetup != "" {
+		config.Setup = gitRemoteSetup
 	}
 
 	// Validate that we have required configuration
 	// Note: config.Path can be empty if using SSH config with default path
 	if config.Host == "" {
-		if err != nil {
-			return nil, fmt.Errorf("cannot open %s and no --remote-path provided: %w", remoteSyncFile, err)
+		if !fileFound {
+			return nil, fmt.Errorf("no remote configuration found: provide via --remote-path flag, %s file, or git config property (remote-sync.remote-path)", remoteSyncFile)
 		}
-		return nil, fmt.Errorf("missing required remote-path configuration (provide via file or --remote-path flag)")
+		return nil, fmt.Errorf("missing required remote-path configuration in %s (or provide via git config remote-sync.remote-path / --remote-path flag)", remoteSyncFile)
 	}
 
 	return config, nil
