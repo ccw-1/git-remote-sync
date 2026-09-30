@@ -67,8 +67,10 @@ remote-setup:. ./.env
 ```bash
 -remote-path string    Remote path in format [user@]host[:path] (overrides config file / git config)
 -remote-setup string   Remote setup command (overrides config file / git config)
--h, -help             Show help message
--v, -version          Show version information
+-version               Show version information
+-mcp                   Run as Model Context Protocol (MCP) server over stdio
+-v                     Verbose mode - show all git commands
+-h, -help              Show help message
 ```
 
 **Examples:**

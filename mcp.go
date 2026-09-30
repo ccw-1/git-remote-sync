@@ -14,7 +14,7 @@ import (
 
 const (
 	mcpServerName    = "git-remote-sync-mcp"
-	mcpServerVersion = "1.0.0"
+	mcpServerVersion = version
 )
 
 // JSONRPCRequest represents an incoming JSON-RPC 2.0 request or notification

@@ -223,9 +223,7 @@ Launch command: `git-remote-sync-mcp` (or `git-remote-sync -mcp`) with standard 
 **Version Information:**
 ```bash
 $ git-remote-sync --version
-git-remote-sync version 1.4.1
-commit: 3b6a5b2
-date: 2026-06-23 17:25:36 -0400
+git-remote-sync version 1.5.0
 ```
 
 ### Usage Examples
@@ -473,4 +471,4 @@ Lines starting with `#` are treated as comments and ignored.
 
 ## License
 
-MIT License - feel free to use and modify as needed.
+This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
