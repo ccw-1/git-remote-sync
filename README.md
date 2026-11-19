@@ -44,6 +44,9 @@ ln -sf git-remote-sync git-remote-sync-mcp
 sudo cp git-remote-sync /usr/local/bin/  # Optional: install system-wide
 ```
 
+With `git-remote-sync` on your PATH, git finds it as a subcommand, so
+`git remote-sync` works from any repository (see [Basic Usage](#basic-usage)).
+
 ## Configuration
 
 Configuration can be provided via command-line flags, a config file (`._remote_sync`), git config properties (local or global), or any combination.
@@ -148,6 +151,14 @@ From anywhere within your git repository:
 
 ```bash
 git-remote-sync
+```
+
+Because git runs any executable named `git-<name>` on the PATH as a subcommand,
+once `git-remote-sync` is on your PATH you can also invoke it as a git command:
+
+```bash
+git remote-sync                      # same as git-remote-sync
+git remote-sync -direction merge -v  # options work the same way
 ```
 
 The utility will:
