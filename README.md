@@ -184,6 +184,7 @@ git-remote-sync -v              # Verbose mode (show all git commands)
 git-remote-sync -remote-path string    # Remote path (user@host:/path)
 git-remote-sync -remote-setup string   # Remote setup command
 git-remote-sync -direction l2r|r2l|merge   # Sync direction (default l2r)
+git-remote-sync -no-mux        # do not share one SSH connection between the remote commands
 git-remote-sync -force          # l2r/r2l: allow overwriting a non fast-forward target branch
 ```
 
@@ -305,6 +306,15 @@ This is useful for:
 - Setting up PATH variables
 - Loading shell configurations
 - Activating virtual environments
+
+### One SSH Connection
+
+A sync issues many short remote commands. To avoid a login for each one, the tool
+opens one SSH master connection at the start (`ssh -fN -o ControlMaster=yes`,
+socket in a private temporary directory) and every later `ssh` call reuses it,
+then closes it at the end (also on errors). On a z/OS remote this cut a no-change
+sync from about 15 s to 3 s. If the master cannot be started, or with `-no-mux`,
+each command uses its own connection as before.
 
 ### Remote Probe
 

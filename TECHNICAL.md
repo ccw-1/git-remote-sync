@@ -571,6 +571,7 @@ ssh user@host 'cd /path && git init'
 ## Version History
 
 ### v1.6.0 (Current)
+- **SSH connection sharing** (`mux.go`): one `ControlMaster` connection, all `sshCommand(...)` calls use `ControlPath` with `ControlMaster=no` (plain connection if the master is gone); `-no-mux` disables; closed by `stopMux` at the end and in `fatal`. pok56 no-change sync 15 s -> 3 s
 - **Fast-forward guard** and `-force`: l2r/r2l no longer silently drop target commits
 - **Air-gapped remotes** - No more `git fetch` or push to origin; commits are shipped as git bundles over SSH
 - **`-direction l2r|r2l|merge`** (also the MCP `direction` parameter)

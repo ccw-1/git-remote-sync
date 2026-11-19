@@ -57,7 +57,7 @@ func localGitCombined(gitRoot string, args ...string) (string, error) {
 // returns stdout. Multi-statement scripts must be wrapped in ( ... ).
 func remoteRun(remote *RemoteConfig, script string) (string, error) {
 	logCommand("R", script)
-	cmd := exec.Command("ssh", getSSHTarget(remote), buildRemoteCommand(remote, script))
+	cmd := sshCommand(getSSHTarget(remote), buildRemoteCommand(remote, script))
 	out, err := cmd.Output()
 	return string(out), err
 }

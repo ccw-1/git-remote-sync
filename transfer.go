@@ -23,7 +23,6 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"os/exec"
 	"path"
 	"path/filepath"
 	"strings"
@@ -114,7 +113,7 @@ func probeRemote(remote *RemoteConfig) error {
 		`else echo OS=UNIX; fi`
 	remoteCmd := buildRemoteCommand(remote, "( "+script+" )")
 	logCommand("R", script)
-	output, err := exec.Command("ssh", getSSHTarget(remote), remoteCmd).Output()
+	output, err := sshCommand(getSSHTarget(remote), remoteCmd).Output()
 	if err != nil {
 		return fmt.Errorf("remote probe failed: %w", err)
 	}
@@ -283,7 +282,7 @@ func uploadBinaryFile(remote *RemoteConfig, localPath, relPath string) error {
 	}
 	logCommand("R", remoteCmd)
 
-	cmd := exec.Command("ssh", getSSHTarget(remote), remoteCmd)
+	cmd := sshCommand(getSSHTarget(remote), remoteCmd)
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
 		return err
@@ -400,7 +399,7 @@ func downloadFiles(remote *RemoteConfig, destRoot string, files []string, onFile
 		}
 		logCommand("R", remoteCmd)
 
-		cmd := exec.Command("ssh", getSSHTarget(remote), remoteCmd)
+		cmd := sshCommand(getSSHTarget(remote), remoteCmd)
 		stdout, err := cmd.StdoutPipe()
 		if err != nil {
 			return err
