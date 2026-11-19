@@ -1,6 +1,16 @@
 # git-remote-sync
 
-A utility to keep a remote git repository in sync with your local one via SSH, without using `git push`. This tool maintains the exact state of your local repository on the remote, including:
+A utility to keep a remote git repository in sync with your local one via SSH, without using `git push`.
+
+> **Designed for air-gapped z/OS systems.** The remote repositories cannot reach
+> the outside world (no GitHub, no origin, no `git fetch`); the only connection is
+> your own SSH access to them. `git-remote-sync` therefore never asks the remote to
+> contact anything: commits travel as **git bundles over SSH**, files travel as
+> **pax (z/OS) or tar (other POSIX systems) streams over SSH**, and the remote only
+> needs `git` and the tools z/OS ships with. Non-z/OS POSIX remotes are detected
+> automatically and are served with plain `tar`.
+
+This tool maintains the exact state of your local repository on the remote, including:
 
 - Current branch
 - Modified files
@@ -12,13 +22,14 @@ A utility to keep a remote git repository in sync with your local one via SSH, w
 - **Direct SSH synchronization** - No need for git push/pull
 - **Flexible configuration** - Configure via git config properties (`remote-sync.*`), config file (`._remote_sync`), or command-line flags
 - **Built-in MCP Server** - Model Context Protocol server (`git-remote-sync-mcp` or `-mcp`) for seamless AI agent/harness integration
-- **Automatic push detection** - Detects unpushed commits and pushes them to origin automatically (v1.4.0+)
-- **Safe push validation** - Only pushes if fast-forward is possible, fails on divergence
+- **Air-gap ready** - The remote never contacts origin; missing commits are shipped as git bundles over SSH (v1.6.0+)
+- **Three directions** - `l2r` (local to remote), `r2l` (remote to local) and `merge` (both ways, by history and timestamp) (v1.6.0+)
 - **Commit-level sync** - Ensures remote is at the same commit as local using direct ref updates
 - **Symlink sync** - Explicitly recreates git-tracked symlinks on the remote (v1.4.4+)
 - **Optimized network traffic** - Skips sync when already at same commit (zero traffic)
 - **Verbose mode** - Show all git commands with `-v` flag (L: local, R: remote)
-- **z/OS support** - Smart file transfer with automatic fallback (direct transfer or iconv conversion)
+- **z/OS support** - Remote OS is probed; z/OS gets pax archives (binary-tagged, AUTOCVT aware, as in z-scp) and fully qualified `/bin` or `/usr/bin` tools, never the zopen versions on PATH
+- **Plain POSIX support** - On any other remote system `tar` is used
 - **Complete state sync** - Syncs working tree and commit history
 - **Batch processing** - Efficient transfer of multiple files
 - **Cleanup** - Removes files on remote that don't exist locally
@@ -143,8 +154,8 @@ The utility will:
 1. Read configuration from file and/or command-line flags
 2. Verify SSH connectivity
 3. Run remote-setup commands (if configured)
-4. Check for unpushed commits and push them to origin if safe (v1.4.0+)
-5. Sync commit history to remote
+4. Probe the remote (z/OS or other POSIX, location of the native tools)
+5. Ship missing commits as a git bundle over SSH and move the target HEAD
 6. Revert remote-only changes (files modified on remote but clean locally, v1.4.5+)
 7. Recreate git-tracked symlinks on the remote (v1.4.4+)
 8. Sync all modified and untracked files
@@ -161,7 +172,21 @@ git-remote-sync -mcp            # Run as Model Context Protocol (MCP) server ove
 git-remote-sync -v              # Verbose mode (show all git commands)
 git-remote-sync -remote-path string    # Remote path (user@host:/path)
 git-remote-sync -remote-setup string   # Remote setup command
+git-remote-sync -direction l2r|r2l|merge   # Sync direction (default l2r)
 ```
+
+### Sync Directions (v1.6.0+)
+
+| Direction | Aliases | Effect |
+|---|---|---|
+| `l2r` (default) | `local-to-remote`, `push` | The remote becomes a copy of local: commits, branch, modified and untracked files. Remote-only changes are reverted. |
+| `r2l` | `remote-to-local`, `pull` | Local becomes a copy of the remote (hard reset to the remote HEAD, remote-modified and untracked files downloaded, stale local files removed). Local-only commits and changes are discarded. |
+| `merge` | `merge-remote-local` | Commits are exchanged both ways. If histories diverged, a merge commit is created (aborts on conflicts). Uncommitted paths changed on only one side take that side's version; a path changed on both sides keeps an existing file over a deleted one, then the **newer mtime wins** (tie: local). Both sides end at the same commit and the same working tree. |
+
+`l2r` and `r2l` are destructive on the target side by design (mirror semantics).
+`merge` compares file times with a one-second resolution using the remote
+clock for remote files, so large clock differences between the machines can
+pick the wrong side. `._remote_sync` is never deleted.
 
 ### Model Context Protocol (MCP) Server
 
@@ -173,7 +198,7 @@ The server launches in MCP mode when invoked via the `git-remote-sync-mcp` execu
 
 | Tool | Purpose | Parameters |
 |---|---|---|
-| `git_remote_sync` | Triggers synchronization of the local repo state to the remote system. | `repo_path` (string, optional - defaults to current working directory)<br>`remote_path` (string, optional - overrides config/git property)<br>`remote_setup` (string, optional - overrides setup command)<br>`verbose` (boolean, optional - show command trace) |
+| `git_remote_sync` | Triggers synchronization of the local repo state to the remote system. | `repo_path` (string, optional - defaults to current working directory)<br>`remote_path` (string, optional - overrides config/git property)<br>`remote_setup` (string, optional - overrides setup command)<br>`direction` (string, optional - `l2r` default, `r2l`, `merge`)<br>`verbose` (boolean, optional - show command trace) |
 | `git_remote_sync_config_get` | Inspects the effective repository sync config, reporting resolved values and detailing what was found in `._remote_sync`, local `.git/config`, and global `~/.gitconfig`. | `repo_path` (string, optional) |
 | `git_remote_sync_config_set` | Sets `remote-sync.remote-path` or `remote-sync.remote-setup` in git config. | `repo_path` (string, optional)<br>`remote_path` (string, optional)<br>`remote_setup` (string, optional)<br>`global` (boolean, default `false` - sets in `~/.gitconfig` if `true`) |
 | `git_remote_sync_help` | Returns a complete quick-reference guide and configuration syntax for the agent. | *(none)* |
@@ -269,55 +294,46 @@ This is useful for:
 - Loading shell configurations
 - Activating virtual environments
 
+### Remote Probe
+
+Right after connecting, one SSH call runs `uname`. If the remote is z/OS
+(`OS/390`), the native tools (`cat rm mkdir ln pax find touch chtag iconv`) are
+located in `/bin` or `/usr/bin` and always called by their fully qualified path,
+because the PATH set up by the remote-setup command often prefers other versions
+(zopen). `git` itself is resolved from PATH. Any other system is treated as plain
+POSIX: `tar` and `cat` from PATH are used and no tool paths are fixed.
+
+### Commits Without Origin
+
+The remote cannot fetch. For each sync the tool asks which commits the remote lacks
+(`git cat-file --batch-check` on the remote), builds a bundle of only those
+commits locally (`git bundle create`, with the remote's tips as prerequisites),
+uploads it over SSH to `.git/remote-sync.bundle`, runs `git bundle unbundle` there
+and removes the file. For `r2l` and `merge` the same happens in the other direction.
+If the remote history cannot be related to the local one, a full bundle is sent.
+
 ### For Unix/Linux Remote Systems
 
-Files are transferred using tar over SSH:
+Files and bundles are transferred using tar over SSH:
 ```bash
 tar -cf - files | ssh user@host 'cd /path && tar -xf -'
 ```
 
 ### For z/OS Remote Systems
 
-The utility automatically detects z/OS and uses `iconv` for EBCDIC/ASCII conversion (codepage 1047 to 819):
+Files and bundles go through `pax` with the `_BPXK_AUTOCVT=ON` handling used by
+[z-scp](../z-scp): the archive carries a `ZOS.taginfo` header (binary, `0 65535`)
+and the EBCDIC/ASCII translation done by AUTOCVT on the SSH stream is compensated
+locally, so the bytes arrive unchanged. Downloads translate back and convert files
+tagged as IBM-1047 text to ISO-8859-1:
 ```bash
-tar -cf - files | ssh user@host 'cd /path && /bin/iconv -f 1047 -t 819 | /bin/tar -xvfUX -'
+# upload  (local: ASCII->EBCDIC table applied to the archive)
+ssh user@host 'cd /path && _BPXK_AUTOCVT=ON /bin/pax -r -x pax -p p'
+# download
+ssh user@host 'cd /path && _BPXK_AUTOCVT=ON /bin/pax -w -x pax file ...'
 ```
 
 ## Requirements
-
-
-### Automatic Push Detection (v1.4.0+)
-
-The tool automatically detects unpushed local commits and handles them intelligently:
-
-**What it does:**
-1. Compares local HEAD with `origin/<branch>`
-2. If commits are unpushed and push is safe (fast-forward), automatically pushes to origin
-3. Triggers remote to fetch the newly pushed commits
-4. Continues with normal sync
-
-**Safety checks:**
-- Only pushes if it's a fast-forward (no force push)
-- If branch has diverged from origin, exits with error and instructions
-- Skips push if no origin remote is configured
-
-**Example output:**
-```bash
-Origin: git@github.com:user/repo.git
-Pushing local commits to origin/main...
-✓ Pushed commits to origin
-Fetching newly pushed commits on remote...
-✓ Remote fetched newly pushed commits
-✓ Synced commits to: a1b2c3d4
-```
-
-**Divergence handling:**
-If your local branch has diverged from origin (would require force push):
-```
-Error: local branch has diverged from origin/main - force push required.
-Please resolve manually:
-  git push --force-with-lease origin main
-```
 
 
 ### Local System
@@ -329,8 +345,9 @@ Please resolve manually:
 ### Remote System
 - SSH server
 - Git repository initialized at the target path
-- tar (or /bin/tar on z/OS)
-- `iconv` (on z/OS systems, typically at /bin/iconv)
+- z/OS: `pax`, `cat`, `rm`, `mkdir`, `ln`, `find`, `touch` in `/bin` or `/usr/bin`; `git` on PATH after the setup command
+- Other POSIX systems: `tar`
+- **No outbound network access is needed on the remote**
 
 ## Example Workflow
 
@@ -410,10 +427,11 @@ ssh user@remote 'cd /path/to/repo && . ./.env && echo OK'
 
 ### z/OS EBCDIC Conversion
 
-If you get encoding errors on z/OS, ensure `iconv` is available:
+If you get encoding errors on z/OS, check the native tools the probe uses:
 ```bash
-ssh user@zos 'which /bin/iconv'
+ssh user@zos 'ls -l /bin/pax /bin/iconv /bin/chtag'
 ```
+Run with `-v` to see the probe result and every remote command.
 
 ### Remote Path Not Found
 
@@ -456,7 +474,8 @@ Lines starting with `#` are treated as comments and ignored.
 ## Limitations
 
 - Requires SSH access to remote
-- Remote must have tar (or /bin/tar)
+- Remote must have git, and pax (z/OS) or tar (other POSIX systems); the remote repository must already be initialised (`git init`)
+- `r2l` and `l2r` overwrite the target side; `merge` relies on comparable clocks
 - Large repositories may take time to sync initially
 - Does not handle git submodules specially
 - Symlinks are recreated unconditionally on every sync (fast, but adds one SSH round-trip)

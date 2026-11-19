@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"flag"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -14,7 +15,7 @@ import (
 
 const (
 	remoteSyncFile = "._remote_sync"
-	version        = "1.5.0"
+	version        = "1.6.0"
 )
 
 var verbose bool
@@ -25,6 +26,11 @@ type RemoteConfig struct {
 	Path     string
 	Setup    string
 	FullSpec string
+
+	// Filled in by probeRemote
+	Probed bool
+	IsZOS  bool
+	Tools  map[string]string // tool name -> fully qualified remote path
 }
 
 type SyncStats struct {
@@ -44,6 +50,7 @@ func main() {
 	// Define command-line flags
 	remotePath := flag.String("remote-path", "", "Remote path in format user@host:/path (overrides config file)")
 	remoteSetup := flag.String("remote-setup", "", "Remote setup command (overrides config file)")
+	directionFlag := flag.String("direction", "l2r", "Sync direction: l2r (local to remote), r2l (remote to local), merge")
 	showHelp := flag.Bool("h", false, "Show help message")
 	showVersion := flag.Bool("version", false, "Show version information")
 	verboseFlag := flag.Bool("v", false, "Verbose mode - show all git commands")
@@ -57,6 +64,11 @@ func main() {
 	}
 
 	verbose = *verboseFlag
+
+	direction, err := parseDirection(*directionFlag)
+	if err != nil {
+		fatal("%v", err)
+	}
 
 	if *showHelp {
 		printHelp()
@@ -104,10 +116,16 @@ func main() {
 	}
 
 	fmt.Printf("Current branch: %s\n", branch)
+	fmt.Printf("Direction: %s\n", directionName(direction))
 
 	// Verify remote accessibility
 	if err := verifyRemote(remote); err != nil {
 		fatal("Cannot access remote: %v", err)
+	}
+
+	// Detect z/OS and locate the remote tools (fully qualified paths)
+	if err := probeRemote(remote); err != nil {
+		fatal("Cannot probe remote: %v", err)
 	}
 
 	fmt.Println("\nStarting sync...")
@@ -115,7 +133,15 @@ func main() {
 	startTime := time.Now()
 
 	// Sync the repository
-	if err := syncRepository(gitRoot, remote, branch, stats); err != nil {
+	switch direction {
+	case dirLocalToRemote:
+		err = syncRepository(gitRoot, remote, branch, stats)
+	case dirRemoteToLocal:
+		err = syncRemoteToLocal(gitRoot, remote, branch, stats)
+	case dirMerge:
+		err = syncMerge(gitRoot, remote, branch, stats)
+	}
+	if err != nil {
 		fatal("Sync failed: %v", err)
 	}
 
@@ -136,6 +162,10 @@ Usage: git-remote-sync [options]
 
 Syncs a local git repository with a remote one via SSH, maintaining the exact
 state including modified files, untracked files, and current branch.
+
+Designed for air-gapped z/OS systems: SSH is the only link, the remote never
+contacts origin. Commits travel as git bundles, files as pax (z/OS) or tar
+(other POSIX systems) streams over SSH.
 
 Configuration can be provided via command-line flags, a config file named '%s'
 in the repository root, or git config properties (local or global).
@@ -164,6 +194,9 @@ The remote-path supports:
 Options:
   -h, -help              Show this help message
   -version               Show version information
+  -direction string      l2r (default): make the remote match local
+                         r2l: make local match the remote
+                         merge: exchange both ways; newer or only-changed file wins
   -mcp                   Run as Model Context Protocol (MCP) server over stdio
   -v                     Verbose mode - show all git commands (prefixed with L: or R:)
   -remote-path string    Remote path in format [user@]host[:path] (overrides config file/git config)
@@ -641,31 +674,14 @@ func syncCommitsViaBundle(gitRoot string, remote *RemoteConfig, branch string, s
 		return nil
 	}
 
-	// Check if local commits need to be pushed to origin first
-	pushed, err := ensureCommitsPushedToOrigin(gitRoot, branch, localHead)
-	if err != nil {
-		return fmt.Errorf("failed to ensure commits are pushed: %w", err)
-	}
-
-	// If we just pushed, remote needs to fetch again to get the new commits
-	if pushed {
-		fmt.Println("Fetching newly pushed commits on remote...")
-		gitCmd := "git fetch --all -f"
-		logCommand("R", gitCmd)
-		remoteCmd := buildRemoteCommand(remote, "git fetch --all -f >/dev/null 2>/dev/null && echo 'FETCHED' || echo 'FETCHFAILED'")
-		cmd := exec.Command("ssh", getSSHTarget(remote), remoteCmd)
-		output, _ := cmd.Output()
-		
-		fetchResult := strings.TrimSpace(string(output))
-		if fetchResult == "FETCHED" {
-			fmt.Println("✓ Remote fetched newly pushed commits")
-		} else {
-			return fmt.Errorf("remote failed to fetch after push")
-		}
+	// The remote is air-gapped (it cannot fetch from origin): ship the commits
+	// it lacks as a git bundle over the SSH connection.
+	if err := shipCommitsToRemote(gitRoot, remote, localHead); err != nil {
+		return fmt.Errorf("failed to ship commits to remote: %w", err)
 	}
 
 	// Remote is behind - need to sync commits
-	// Directly update refs on remote (avoids bundle pack corruption issues)
+	// The objects are on the remote now: point the branch at the commit
 	
 	gitCmd := fmt.Sprintf("git update-ref refs/heads/%s %s && git symbolic-ref HEAD refs/heads/%s && git reset --hard %s", branch, localHead, branch, localHead)
 	logCommand("R", gitCmd)
@@ -824,71 +840,6 @@ func resetRemoteWorkingTree(remote *RemoteConfig) error {
 	return nil
 }
 
-func ensureCommitsPushedToOrigin(gitRoot string, branch string, localHead string) (bool, error) {
-	// Check if origin remote exists
-	cmdStr := "git remote get-url origin"
-	logCommand("L", cmdStr)
-	cmd := exec.Command("git", "remote", "get-url", "origin")
-	cmd.Dir = gitRoot
-	originURL, err := cmd.Output()
-	if err != nil {
-		// No origin configured, skip push check
-		fmt.Println("⚠ No origin remote configured, skipping push check")
-		return false, nil
-	}
-	
-	originURLStr := strings.TrimSpace(string(originURL))
-	fmt.Printf("Origin: %s\n", originURLStr)
-	
-	// Get the commit hash that origin/branch points to
-	cmdStr = fmt.Sprintf("git rev-parse origin/%s", branch)
-	logCommand("L", cmdStr)
-	cmd = exec.Command("git", "rev-parse", fmt.Sprintf("origin/%s", branch))
-	cmd.Dir = gitRoot
-	output, err := cmd.Output()
-	
-	var originBranchHead string
-	if err != nil {
-		// Branch doesn't exist on origin yet
-		fmt.Printf("Branch '%s' not found on origin, will push...\n", branch)
-	} else {
-		originBranchHead = strings.TrimSpace(string(output))
-		
-		// Check if local and origin are at same commit
-		if originBranchHead == localHead {
-			fmt.Println("✓ Local commits already pushed to origin")
-			return false, nil
-		}
-		
-		// Check if local is ahead of origin (fast-forward possible)
-		cmdStr = fmt.Sprintf("git merge-base --is-ancestor origin/%s HEAD", branch)
-		logCommand("L", cmdStr)
-		cmd = exec.Command("git", "merge-base", "--is-ancestor", fmt.Sprintf("origin/%s", branch), "HEAD")
-		cmd.Dir = gitRoot
-		err = cmd.Run()
-		
-		if err != nil {
-			// Not a fast-forward, would require force push
-			return false, fmt.Errorf("local branch has diverged from origin/%s - force push required. Please resolve manually:\n  git push --force-with-lease origin %s", branch, branch)
-		}
-	}
-	
-	// Push is safe (fast-forward or new branch)
-	fmt.Printf("Pushing local commits to origin/%s...\n", branch)
-	cmdStr = fmt.Sprintf("git push origin %s", branch)
-	logCommand("L", cmdStr)
-	cmd = exec.Command("git", "push", "origin", branch)
-	cmd.Dir = gitRoot
-	output, err = cmd.CombinedOutput()
-	
-	if err != nil {
-		return false, fmt.Errorf("failed to push to origin: %w\nOutput: %s", err, string(output))
-	}
-	
-	fmt.Println("✓ Pushed commits to origin")
-	return true, nil
-}
-
 func ensureRemoteBranch(remote *RemoteConfig, branch string) error {
 	// Check if remote is a git repository
 	gitCmd := "git rev-parse --git-dir"
@@ -903,20 +854,6 @@ func ensureRemoteBranch(remote *RemoteConfig, branch string) error {
 
 	if strings.Contains(string(output), "NOTGIT") {
 		return fmt.Errorf("remote path is not a git repository")
-	}
-
-	// Fetch all branches from origin to ensure remote is up to date
-	gitCmd = "git fetch --all -f"
-	logCommand("R", gitCmd)
-	remoteCmd = buildRemoteCommand(remote, "git fetch --all -f >/dev/null 2>/dev/null && echo 'FETCHED' || echo 'FETCHFAILED'")
-	cmd = exec.Command("ssh", getSSHTarget(remote), remoteCmd)
-	output, _ = cmd.Output()
-	
-	fetchResult := strings.TrimSpace(string(output))
-	if fetchResult == "FETCHED" {
-		fmt.Println("✓ Fetched latest branches from origin")
-	} else {
-		fmt.Println("⚠ Failed to fetch from origin (continuing anyway)")
 	}
 
 	// Check if branch exists on remote
@@ -1020,10 +957,10 @@ func syncSymlinks(gitRoot string, remote *RemoteConfig, stats *SyncStats) error 
 	for _, sl := range symlinks {
 		dir := filepath.Dir(sl.path)
 		if dir != "." {
-			cmds = append(cmds, fmt.Sprintf("mkdir -p %s", dir))
+			cmds = append(cmds, fmt.Sprintf("%s -p %s", rt(remote, "mkdir"), dir))
 		}
 		// Remove whatever is there (regular file from a bad reset, or stale symlink)
-		cmds = append(cmds, fmt.Sprintf("rm -f %s && ln -sf %s %s", sl.path, sl.target, sl.path))
+		cmds = append(cmds, fmt.Sprintf("%s -f %s && %s -sf %s %s", rt(remote, "rm"), sl.path, rt(remote, "ln"), sl.target, sl.path))
 	}
 	remoteScript := strings.Join(cmds, " && ")
 	remoteCmd := buildRemoteCommand(remote, remoteScript+" && echo OK")
@@ -1042,10 +979,10 @@ func syncSymlinks(gitRoot string, remote *RemoteConfig, stats *SyncStats) error 
 
 func syncFiles(gitRoot string, remote *RemoteConfig, files []string, stats *SyncStats) error {
 	// Check if remote is z/OS
-	remoteCheckCmd := buildRemoteCommand(remote, "which /bin/iconv > /dev/null 2>&1 && echo ZOS || echo UNIX")
-	checkCmd := exec.Command("ssh", getSSHTarget(remote), remoteCheckCmd)
-	output, _ := checkCmd.Output()
-	isZOS := strings.TrimSpace(string(output))
+	isZOS := "UNIX"
+	if remote.IsZOS {
+		isZOS = "ZOS"
+	}
 
 	// Filter files that actually need syncing by comparing checksums
 	filesToSync, err := filterFilesNeedingSync(gitRoot, remote, files, isZOS)
@@ -1107,20 +1044,20 @@ func syncSingleFileZOS(gitRoot string, remote *RemoteConfig, file string, stats 
 	// Create remote directory if needed
 	remoteDir := filepath.Dir(file)
 	if remoteDir != "." {
-		mkdirCmd := buildRemoteCommand(remote, fmt.Sprintf("mkdir -p %s", remoteDir))
+		mkdirCmd := buildRemoteCommand(remote, fmt.Sprintf("%s -p %s", rt(remote, "mkdir"), remoteDir))
 		mkdirExec := exec.Command("ssh", getSSHTarget(remote), mkdirCmd)
 		_ = mkdirExec.Run() // Ignore errors if dir exists
 	}
 	
 	// Try direct transfer first (some z/OS systems handle ASCII automatically)
-	transferCmd := buildRemoteCommand(remote, fmt.Sprintf("cat > %s", file))
+	transferCmd := buildRemoteCommand(remote, fmt.Sprintf("%s > %s", rt(remote, "cat"), file))
 	cmd := exec.Command("ssh", getSSHTarget(remote), transferCmd)
 	cmd.Stdin = bytes.NewReader(content)
 	
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		// If direct transfer fails, try with iconv for EBCDIC conversion
-		transferCmd = buildRemoteCommand(remote, fmt.Sprintf("/bin/iconv -f 1047 -t 819 > %s", file))
+		transferCmd = buildRemoteCommand(remote, fmt.Sprintf("%s -f 1047 -t 819 > %s", rt(remote, "iconv"), file))
 		cmd = exec.Command("ssh", getSSHTarget(remote), transferCmd)
 		cmd.Stdin = bytes.NewReader(content)
 		
@@ -1202,16 +1139,31 @@ func syncFileBatch(gitRoot string, remote *RemoteConfig, files []string, stats *
 	}
 	tmpFile.Close()
 
-	// Create tar from file list
-	tarCmd := fmt.Sprintf("cd %s && tar -cf - -T %s 2>/dev/null", gitRoot, tmpFile.Name())
-	remoteTarCmd := buildRemoteCommand(remote, "tar -xf - 2>&1")
-	fullCmd := fmt.Sprintf("%s | ssh %s@%s '%s'",
-		tarCmd, remote.User, remote.Host, remoteTarCmd)
-	cmd := exec.Command("bash", "-c", fullCmd)
-
-	output, err := cmd.CombinedOutput()
-	if err != nil {
-		return fmt.Errorf("tar transfer failed: %w\nOutput: %s", err, string(output))
+	// Local tar piped into the remote tar over ssh (no shell involved, so
+	// no quoting problems and no user@host assumptions).
+	tarCmd := exec.Command("tar", "-C", gitRoot, "-cf", "-", "-T", tmpFile.Name())
+	sshCmd := exec.Command("ssh", getSSHTarget(remote), buildRemoteCommand(remote, "tar -xf - 2>&1"))
+	pr, pw := io.Pipe()
+	tarCmd.Stdout = pw
+	sshCmd.Stdin = pr
+	var tarErr, sshOut strings.Builder
+	tarCmd.Stderr = &tarErr
+	sshCmd.Stdout = &sshOut
+	sshCmd.Stderr = &sshOut
+	if err := tarCmd.Start(); err != nil {
+		return err
+	}
+	if err := sshCmd.Start(); err != nil {
+		tarCmd.Process.Kill()
+		tarCmd.Wait()
+		return err
+	}
+	terr := tarCmd.Wait()
+	pw.Close()
+	serr := sshCmd.Wait()
+	if terr != nil || serr != nil {
+		return fmt.Errorf("tar transfer failed: local tar: %v, remote: %v\nOutput: %s%s",
+			terr, serr, tarErr.String(), sshOut.String())
 	}
 
 	return nil
@@ -1263,7 +1215,7 @@ func cleanupRemote(gitRoot string, remote *RemoteConfig, localFiles []string, st
 		batch := filesToDelete[i:end]
 
 		// Build rm command
-		remoteRmCmd := buildRemoteCommand(remote, fmt.Sprintf("rm -f %s", strings.Join(batch, " ")))
+		remoteRmCmd := buildRemoteCommand(remote, fmt.Sprintf("%s -f %s", rt(remote, "rm"), strings.Join(batch, " ")))
 		rmCmd := exec.Command("ssh", getSSHTarget(remote), remoteRmCmd)
 		
 		if err := rmCmd.Run(); err != nil {

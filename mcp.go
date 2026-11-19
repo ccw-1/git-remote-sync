@@ -124,6 +124,11 @@ func getTools() []ToolDefinition {
 						"type":        "string",
 						"description": "Remote setup/environment command executed before remote operations (e.g. '. ~/.env' or '. ./.env'). Overrides config file and git config.",
 					},
+					"direction": map[string]any{
+						"type":        "string",
+						"enum":        []string{"l2r", "r2l", "merge"},
+						"description": "Sync direction: l2r (default) makes the remote match local; r2l makes local match the remote; merge combines both by commit history, then newest mtime. The remote may be air-gapped: everything travels over SSH.",
+					},
 					"verbose": map[string]any{
 						"type":        "boolean",
 						"description": "Enable verbose output to show all local and remote git commands. Default false.",
@@ -222,6 +227,7 @@ func handleGitRemoteSync(id json.RawMessage, args map[string]any) {
 	remotePath, _ := args["remote_path"].(string)
 	remoteSetup, _ := args["remote_setup"].(string)
 	verbose, _ := args["verbose"].(bool)
+	direction, _ := args["direction"].(string)
 
 	bin := resolveGitRemoteSyncBin()
 
@@ -231,6 +237,9 @@ func handleGitRemoteSync(id json.RawMessage, args map[string]any) {
 	}
 	if remoteSetup != "" {
 		cmdArgs = append(cmdArgs, "-remote-setup", remoteSetup)
+	}
+	if direction != "" {
+		cmdArgs = append(cmdArgs, "-direction", direction)
 	}
 	if verbose {
 		cmdArgs = append(cmdArgs, "-v")
@@ -450,10 +459,12 @@ func handleConfigSet(id json.RawMessage, args map[string]any) {
 }
 
 func handleHelp(id json.RawMessage) {
-	helpText := `git-remote-sync — sync local git repository with remote over SSH without git push.
+	helpText := `git-remote-sync — sync local git repository with a remote over SSH without git push.
+Designed for air-gapped z/OS systems: SSH is the only link, the remote never contacts origin.
+Commits travel as git bundles over SSH; direction l2r|r2l|merge.
 
 MCP Tools:
-  - git_remote_sync: Run sync on a repository (supports repo_path, remote_path, remote_setup, verbose)
+  - git_remote_sync: Run sync on a repository (supports repo_path, remote_path, remote_setup, direction, verbose)
   - git_remote_sync_config_get: Inspect effective and source-specific configuration
   - git_remote_sync_config_set: Set git config properties (locally or globally)
   - git_remote_sync_help: Show this help summary

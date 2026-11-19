@@ -3,7 +3,9 @@
 ## Architecture Overview
 
 ### Design Philosophy
-The utility is designed as a single-binary Go application that synchronizes git repository working trees between local and remote systems via SSH. It avoids using `rsync` and instead relies on `tar` over SSH with optional EBCDIC/ASCII conversion for z/OS systems.
+The utility is designed as a single-binary Go application that synchronizes git repository working trees between local and remote systems via SSH. It avoids using `rsync` and instead relies on `tar` over SSH (plain POSIX remotes) or `pax` with AUTOCVT handling borrowed from z-scp (z/OS remotes).
+
+**Air-gapped remotes (v1.6.0+).** The remote repositories cannot reach origin or any other network; SSH from the local machine is the only link. Nothing in the tool makes the remote contact a third party: no `git fetch`, no push to origin. Missing commits are moved as git bundles through the SSH stream, in the direction needed (`-direction l2r|r2l|merge`).
 
 ### Core Components
 
@@ -13,9 +15,11 @@ main()
   ├── readRemoteConfig()
   ├── getCurrentBranch()
   ├── verifyRemote()
-  └── syncRepository()
+  ├── probeRemote()                ← transfer.go: uname, /bin|/usr/bin tool paths (z/OS only)
+  └── syncRepository()             ← l2r;  syncRemoteToLocal() = r2l;  syncMerge() = merge (modes.go)
       ├── ensureRemoteBranch()
       ├── syncCommitsViaBundle()
+      │   └── shipCommitsToRemote()    ← commits.go: git bundle over ssh
       ├── discardRemoteOnlyChanges() ← v1.4.5
       ├── syncSymlinks()           ← v1.4.4
       ├── getFilesToSync()
@@ -309,11 +313,31 @@ Function: `ensureRemoteBranch(remote *RemoteConfig, branch string) error`
 2. Attempt to checkout branch (suppress all output)
 3. Check result via echo statement
 
-**Why Not Fetch:**
-- Fetching can be slow and may fail (network issues, corrupted refs)
-- We're syncing working tree, not git history
-- Branch will be correct after .git sync (if needed in future)
-- Simpler and more reliable for development workflow
+**Why No Fetch (v1.6.0):**
+- The remote is air-gapped; it cannot reach origin, so neither `git fetch` nor "push to origin, then fetch" can work.
+- Instead the missing commits are shipped as a bundle (see below).
+
+## Air-Gapped Operation (v1.6.0+)
+
+### Remote probe (`transfer.go`)
+`probeRemote` runs once: `uname` decides `RemoteConfig.IsZOS` (`OS/390`). On z/OS the tools `cat rm mkdir ln pax find touch chtag iconv` are looked up in `/bin` then `/usr/bin` and stored in `RemoteConfig.Tools`; `rt(remote, "tool")` returns the fully qualified path so the zopen versions earlier on PATH are never used. `git` stays PATH-resolved. On any other system no tool paths are fixed and plain `tar` is used.
+
+### File and bundle transfer
+- **POSIX remote:** upload = a one-file ustar archive written by `writeTarFile` into `ssh host 'tar -xf -'`; download = `tar -cf -` parsed with `archive/tar` (batches of 50). `syncFileBatch` pipes the local `tar` into the remote `tar` without a local shell.
+- **z/OS remote:** AUTOCVT is on for ssh sessions: z/OS translates stdin with a2e and stdout with e2a. Upload applies the e2a table locally before ssh, download applies a2e after, so the net effect is identity (same trick as z-scp). The archive is pax with an extended header `ZOS.taginfo=0 65535` (binary tag) written by `writePaxFile` (checksums computed on the logical bytes). Downloaded entries tagged `1 1047` are converted with e2a on extraction.
+
+### Shipping commits (`commits.go`)
+`shipCommitsToRemote(local -> remote)` and `shipCommitsToLocal(remote -> local)`:
+1. Ask the receiver which of the sender's commits it already has (`git cat-file --batch-check`) and collect the receiver's tips as bundle prerequisites (`^sha`). On failure fall back to a full bundle.
+2. Create a bundle of the missing commits on the sender under the temporary ref `refs/remote-sync/tip`.
+3. Transfer it (upload as above; download: remote `git bundle create` then `chtag -b` on z/OS, fetched with pax).
+4. `git bundle unbundle` on the receiver; the bundle file (`.git/remote-sync.bundle`) is removed.
+Then HEAD and the branch are moved with `update-ref`, `symbolic-ref` and `reset --hard` (l2r) as before.
+
+### Directions (`modes.go`)
+- **l2r** (`syncRepository`): remote mirrors local.
+- **r2l** (`syncRemoteToLocal`): bundle from remote, local `reset --hard` to the remote HEAD, download remote-dirty and untracked files, delete local stale files (never `._remote_sync`).
+- **merge** (`syncMerge`): ship commits both ways; for diverged histories create a merge commit with `git merge-tree --write-tree` + `commit-tree` (abort on conflicts); move both HEADs with mixed reset; `decideMerge` (pure function, unit-testable) assigns each dirty path to a side: only one side changed -> that side; both -> existing file beats deleted, then newer mtime (remote times via `TZ=UTC0 touch -t` + `find -newer` for second resolution), tie -> local. Warnings are printed when an uncommitted change overrides an incoming commit. The run ends with `verifyConverged`.
 
 ## Performance Optimizations
 
@@ -545,7 +569,14 @@ ssh user@host 'cd /path && git init'
 
 ## Version History
 
-### v1.4.5 (Current)
+### v1.6.0 (Current)
+- **Air-gapped remotes** - No more `git fetch` or push to origin; commits are shipped as git bundles over SSH
+- **`-direction l2r|r2l|merge`** (also the MCP `direction` parameter)
+- **Remote probe** - z/OS vs POSIX detection, fully qualified remote tools on z/OS
+- **pax transfer on z/OS** (AUTOCVT-aware, from z-scp), tar on other POSIX systems
+- `syncFileBatch` no longer goes through `bash -c` and works without an explicit user in the remote path
+
+### v1.4.5
 - **Remote-only change revert** - Reverts tracked files modified on the remote that are clean locally
 - Compares `git status --porcelain -z` maps from both sides to find remote-only changes
 - Reverts only those files via `git checkout HEAD -- <files>` (shell-quoted, batched)
