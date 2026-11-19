@@ -184,6 +184,7 @@ git-remote-sync -v              # Verbose mode (show all git commands)
 git-remote-sync -remote-path string    # Remote path (user@host:/path)
 git-remote-sync -remote-setup string   # Remote setup command
 git-remote-sync -direction l2r|r2l|merge   # Sync direction (default l2r)
+git-remote-sync -force          # l2r/r2l: allow overwriting a non fast-forward target branch
 ```
 
 ### Sync Directions (v1.6.0+)
@@ -194,7 +195,7 @@ git-remote-sync -direction l2r|r2l|merge   # Sync direction (default l2r)
 | `r2l` | `remote-to-local`, `pull` | Local becomes a copy of the remote (hard reset to the remote HEAD, remote-modified and untracked files downloaded, stale local files removed). Local-only commits and changes are discarded. |
 | `merge` | `merge-remote-local` | Commits are exchanged both ways. If histories diverged, a merge commit is created (aborts on conflicts). Uncommitted paths changed on only one side take that side's version; a path changed on both sides keeps an existing file over a deleted one, then the **newer mtime wins** (tie: local). Both sides end at the same commit and the same working tree. |
 
-`l2r` and `r2l` are destructive on the target side by design (mirror semantics).
+`l2r` and `r2l` make the target a mirror of the source, but they **refuse to drop commits**: if the target branch (or HEAD) holds commits that are not in the new history (not a fast-forward), the sync stops and lists them (up to 10). Use `-direction merge` to combine both histories, or `-force` to overwrite anyway; the old tip is then saved as `refs/remote-sync/previous/<sha>` on the overwritten side. Uncommitted changes on the target side are still discarded.
 `merge` compares file times with a one-second resolution using the remote
 clock for remote files, so large clock differences between the machines can
 pick the wrong side. `._remote_sync` is never deleted.
@@ -209,7 +210,7 @@ The server launches in MCP mode when invoked via the `git-remote-sync-mcp` execu
 
 | Tool | Purpose | Parameters |
 |---|---|---|
-| `git_remote_sync` | Triggers synchronization of the local repo state to the remote system. | `repo_path` (string, optional - defaults to current working directory)<br>`remote_path` (string, optional - overrides config/git property)<br>`remote_setup` (string, optional - overrides setup command)<br>`direction` (string, optional - `l2r` default, `r2l`, `merge`)<br>`verbose` (boolean, optional - show command trace) |
+| `git_remote_sync` | Triggers synchronization of the local repo state to the remote system. | `repo_path` (string, optional - defaults to current working directory)<br>`remote_path` (string, optional - overrides config/git property)<br>`remote_setup` (string, optional - overrides setup command)<br>`direction` (string, optional - `l2r` default, `r2l`, `merge`)<br>`force` (boolean, optional - allow non fast-forward overwrite in l2r/r2l)<br>`verbose` (boolean, optional - show command trace) |
 | `git_remote_sync_config_get` | Inspects the effective repository sync config, reporting resolved values and detailing what was found in `._remote_sync`, local `.git/config`, and global `~/.gitconfig`. | `repo_path` (string, optional) |
 | `git_remote_sync_config_set` | Sets `remote-sync.remote-path` or `remote-sync.remote-setup` in git config. | `repo_path` (string, optional)<br>`remote_path` (string, optional)<br>`remote_setup` (string, optional)<br>`global` (boolean, default `false` - sets in `~/.gitconfig` if `true`) |
 | `git_remote_sync_help` | Returns a complete quick-reference guide and configuration syntax for the agent. | *(none)* |
@@ -486,7 +487,7 @@ Lines starting with `#` are treated as comments and ignored.
 
 - Requires SSH access to remote
 - Remote must have git, and pax (z/OS) or tar (other POSIX systems); the remote repository must already be initialised (`git init`)
-- `r2l` and `l2r` overwrite the target side; `merge` relies on comparable clocks
+- `r2l` and `l2r` overwrite the target working tree (and, with `-force`, its branch); `merge` relies on comparable clocks
 - Large repositories may take time to sync initially
 - Does not handle git submodules specially
 - Symlinks are recreated unconditionally on every sync (fast, but adds one SSH round-trip)

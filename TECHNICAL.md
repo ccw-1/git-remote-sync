@@ -335,6 +335,7 @@ Function: `ensureRemoteBranch(remote *RemoteConfig, branch string) error`
 Then HEAD and the branch are moved with `update-ref`, `symbolic-ref` and `reset --hard` (l2r) as before.
 
 ### Directions (`modes.go`)
+- **Fast-forward guard** (`guard.go`): before l2r/r2l moves a branch, `guardRemoteMove`/`guardLocalMove` check with `git merge-base --is-ancestor` that the old HEAD and branch tip are ancestors of the new commit; otherwise error with `git log` of the dropped commits. `-force` (`forceMove`) saves each old tip as `refs/remote-sync/previous/<sha>` and proceeds. Merge needs no guard.
 - **l2r** (`syncRepository`): remote mirrors local.
 - **r2l** (`syncRemoteToLocal`): bundle from remote, local `reset --hard` to the remote HEAD, download remote-dirty and untracked files, delete local stale files (never `._remote_sync`).
 - **merge** (`syncMerge`): ship commits both ways; for diverged histories create a merge commit with `git merge-tree --write-tree` + `commit-tree` (abort on conflicts); move both HEADs with mixed reset; `decideMerge` (pure function, unit-testable) assigns each dirty path to a side: only one side changed -> that side; both -> existing file beats deleted, then newer mtime (remote times via `TZ=UTC0 touch -t` + `find -newer` for second resolution), tie -> local. Warnings are printed when an uncommitted change overrides an incoming commit. The run ends with `verifyConverged`.
@@ -570,6 +571,7 @@ ssh user@host 'cd /path && git init'
 ## Version History
 
 ### v1.6.0 (Current)
+- **Fast-forward guard** and `-force`: l2r/r2l no longer silently drop target commits
 - **Air-gapped remotes** - No more `git fetch` or push to origin; commits are shipped as git bundles over SSH
 - **`-direction l2r|r2l|merge`** (also the MCP `direction` parameter)
 - **Remote probe** - z/OS vs POSIX detection, fully qualified remote tools on z/OS

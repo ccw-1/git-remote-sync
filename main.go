@@ -50,6 +50,7 @@ func main() {
 	// Define command-line flags
 	remotePath := flag.String("remote-path", "", "Remote path in format user@host:/path (overrides config file)")
 	remoteSetup := flag.String("remote-setup", "", "Remote setup command (overrides config file)")
+	forceFlag := flag.Bool("force", false, "Allow l2r/r2l to overwrite a target branch that is not a fast-forward (old tip is saved)")
 	directionFlag := flag.String("direction", "l2r", "Sync direction: l2r (local to remote), r2l (remote to local), merge")
 	showHelp := flag.Bool("h", false, "Show help message")
 	showVersion := flag.Bool("version", false, "Show version information")
@@ -64,6 +65,7 @@ func main() {
 	}
 
 	verbose = *verboseFlag
+	forceMove = *forceFlag
 
 	direction, err := parseDirection(*directionFlag)
 	if err != nil {
@@ -197,6 +199,8 @@ Options:
   -direction string      l2r (default): make the remote match local
                          r2l: make local match the remote
                          merge: exchange both ways; newer or only-changed file wins
+  -force                 l2r/r2l: overwrite a target branch that is not a fast-forward
+                         (the old tip is saved under refs/remote-sync/previous/<sha>)
   -mcp                   Run as Model Context Protocol (MCP) server over stdio
   -v                     Verbose mode - show all git commands (prefixed with L: or R:)
   -remote-path string    Remote path in format [user@]host[:path] (overrides config file/git config)
@@ -678,6 +682,11 @@ func syncCommitsViaBundle(gitRoot string, remote *RemoteConfig, branch string, s
 	// it lacks as a git bundle over the SSH connection.
 	if err := shipCommitsToRemote(gitRoot, remote, localHead); err != nil {
 		return fmt.Errorf("failed to ship commits to remote: %w", err)
+	}
+
+	// Never drop remote commits silently
+	if err := guardRemoteMove(remote, branch, localHead); err != nil {
+		return err
 	}
 
 	// Remote is behind - need to sync commits

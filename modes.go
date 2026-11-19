@@ -382,6 +382,9 @@ func syncRemoteToLocal(gitRoot string, remote *RemoteConfig, localBranch string,
 	if branch != localBranch {
 		fmt.Printf("Switching local branch to the remote's branch: %s\n", branch)
 	}
+	if err := guardLocalMove(gitRoot, branch, rHead); err != nil {
+		return err
+	}
 	fmt.Println("Resetting local working tree to remote HEAD (local-only changes are discarded)...")
 	if err := moveLocalHead(gitRoot, branch, rHead, true, nil, nil); err != nil {
 		return err

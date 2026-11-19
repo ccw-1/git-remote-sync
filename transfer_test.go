@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -70,5 +71,14 @@ func TestParseDirection(t *testing.T) {
 	}
 	if _, err := parseDirection("bogus"); err == nil {
 		t.Error("expected error")
+	}
+}
+
+func TestDroppedTips(t *testing.T) {
+	a := strings.Repeat("a", 40)
+	b := strings.Repeat("b", 40)
+	got := droppedTips("noise\nD:" + a + "\nD:" + a + "\nD:" + b + "\nD:xyz\n")
+	if len(got) != 2 || got[0] != a || got[1] != b {
+		t.Fatalf("got %v", got)
 	}
 }

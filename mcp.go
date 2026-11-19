@@ -129,6 +129,10 @@ func getTools() []ToolDefinition {
 						"enum":        []string{"l2r", "r2l", "merge"},
 						"description": "Sync direction: l2r (default) makes the remote match local; r2l makes local match the remote; merge combines both by commit history, then newest mtime. The remote may be air-gapped: everything travels over SSH.",
 					},
+					"force": map[string]any{
+						"type":        "boolean",
+						"description": "For l2r/r2l: overwrite a target branch whose commits are not in the new history (not a fast-forward). Without it the sync stops and lists the commits that would be dropped. The old tip is saved under refs/remote-sync/previous/<sha>.",
+					},
 					"verbose": map[string]any{
 						"type":        "boolean",
 						"description": "Enable verbose output to show all local and remote git commands. Default false.",
@@ -228,6 +232,7 @@ func handleGitRemoteSync(id json.RawMessage, args map[string]any) {
 	remoteSetup, _ := args["remote_setup"].(string)
 	verbose, _ := args["verbose"].(bool)
 	direction, _ := args["direction"].(string)
+	force, _ := args["force"].(bool)
 
 	bin := resolveGitRemoteSyncBin()
 
@@ -240,6 +245,9 @@ func handleGitRemoteSync(id json.RawMessage, args map[string]any) {
 	}
 	if direction != "" {
 		cmdArgs = append(cmdArgs, "-direction", direction)
+	}
+	if force {
+		cmdArgs = append(cmdArgs, "-force")
 	}
 	if verbose {
 		cmdArgs = append(cmdArgs, "-v")
@@ -464,7 +472,7 @@ Designed for air-gapped z/OS systems: SSH is the only link, the remote never con
 Commits travel as git bundles over SSH; direction l2r|r2l|merge.
 
 MCP Tools:
-  - git_remote_sync: Run sync on a repository (supports repo_path, remote_path, remote_setup, direction, verbose)
+  - git_remote_sync: Run sync on a repository (supports repo_path, remote_path, remote_setup, direction, force, verbose)
   - git_remote_sync_config_get: Inspect effective and source-specific configuration
   - git_remote_sync_config_set: Set git config properties (locally or globally)
   - git_remote_sync_help: Show this help summary
