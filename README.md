@@ -307,6 +307,8 @@ This is useful for:
 - Loading shell configurations
 - Activating virtual environments
 
+Note that the environment file (.env in the above example) must be an EBCDIC file.
+
 ### One SSH Connection
 
 A sync issues many short remote commands. To avoid a login for each one, the tool
