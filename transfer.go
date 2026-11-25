@@ -101,9 +101,11 @@ func (c translateReader) Read(p []byte) (int, error) {
 // path. On z/OS the PATH after the setup command usually prefers other
 // versions of these tools (e.g. zopen), so the native ones are addressed
 // explicitly. Depending on the system they live in /bin or in /usr/bin.
-var remoteToolNames = []string{"cat", "rm", "mkdir", "ln", "pax", "find", "touch", "chtag", "iconv"}
+var remoteToolNames = []string{"cat", "rm", "mkdir", "mv", "ln", "pax", "find", "touch", "chtag", "iconv"}
 
 // probeRemote determines whether the remote is z/OS and where the tools are.
+// It runs no setup command and does not change into the repository directory,
+// so it works before that directory (and the files a setup command needs) exist.
 func probeRemote(remote *RemoteConfig) error {
 	// Only z/OS needs the fully qualified tools; any other POSIX system
 	// is served by plain tar/cat found on PATH.
@@ -111,7 +113,7 @@ func probeRemote(remote *RemoteConfig) error {
 		`for t in ` + strings.Join(remoteToolNames, " ") + `; do ` +
 		`for d in /bin /usr/bin; do if [ -x $d/$t ]; then echo T:$t=$d/$t; break; fi; done; done; ` +
 		`else echo OS=UNIX; fi`
-	remoteCmd := buildRemoteCommand(remote, "( "+script+" )")
+	remoteCmd := "( " + script + " )"
 	logCommand("R", script)
 	output, err := sshCommand(getSSHTarget(remote), remoteCmd).Output()
 	if err != nil {
@@ -164,22 +166,68 @@ func paxXhdrRecord(key, val string) string {
 	}
 }
 
-// paxHeader builds one 512-byte ustar header. The checksum is computed on the
+// paxRecord is one extended header record ("key=value") of a pax 'x' entry.
+type paxRecord struct {
+	key, val string
+}
+
+// splitUstarName splits a path at a slash into the ustar prefix (max 155
+// bytes) and name (max 100 bytes) fields. ok is false when the path cannot be
+// represented in a plain ustar header (a pax "path" record is then needed).
+func splitUstarName(name string) (prefix, rest string, ok bool) {
+	if len(name) <= 100 {
+		return "", name, true
+	}
+	for i := len(name) - 1; i > 0; i-- {
+		if name[i] != '/' {
+			continue
+		}
+		r := name[i+1:]
+		if r == "" {
+			continue // trailing slash of a directory name
+		}
+		if len(r) > 100 {
+			return "", "", false // the suffix only grows further to the left
+		}
+		if i <= 155 {
+			return name[:i], r, true
+		}
+	}
+	return "", "", false
+}
+
+// ustarHeader builds one 512-byte ustar header. The checksum is computed on the
 // logical bytes (z-scp: remote pax sees the original bytes after AUTOCVT, so
 // the wire translation must not enter the checksum).
-func paxHeader(name string, size int64, mtime int64, typeflag byte, mode uint32) ([]byte, error) {
-	if len(name) > 100 {
-		return nil, fmt.Errorf("name too long for ustar: %s", name)
+//
+// When the name does not fit the ustar name/prefix fields, needsPath is true
+// and the header carries a truncated placeholder name; the caller must write a
+// pax "path" record before the header. A link target longer than 100 bytes is
+// rejected the same way: the caller writes a "linkpath" record and passes an
+// empty linkname.
+func ustarHeader(name string, size int64, mtime int64, typeflag byte, mode uint32, linkname string) (hdr []byte, needsPath bool, err error) {
+	if len(linkname) > 100 {
+		return nil, false, fmt.Errorf("link target too long for ustar: %s", linkname)
+	}
+	prefix, rest, ok := splitUstarName(name)
+	if !ok {
+		needsPath = true
+		prefix, rest = "", name
+		if len(rest) > 100 {
+			rest = rest[:100]
+		}
 	}
 	h := make([]byte, 512)
-	copy(h, name)
+	copy(h, rest)
 	copy(h[100:], fmt.Sprintf("%07o", mode&07777))
 	copy(h[108:], "0000000")
 	copy(h[116:], "0000000")
 	copy(h[124:], fmt.Sprintf("%011o", size))
 	copy(h[136:], fmt.Sprintf("%011o", mtime))
 	h[156] = typeflag
+	copy(h[157:], linkname)
 	copy(h[257:], "ustar\x0000")
+	copy(h[345:], prefix)
 	for i := 148; i < 156; i++ {
 		h[i] = ' '
 	}
@@ -190,7 +238,44 @@ func paxHeader(name string, size int64, mtime int64, typeflag byte, mode uint32)
 	copy(h[148:], fmt.Sprintf("%06o", sum))
 	h[154] = 0
 	h[155] = ' '
+	return h, needsPath, nil
+}
+
+// paxHeader builds one 512-byte ustar header for a path that fits ustar.
+func paxHeader(name string, size int64, mtime int64, typeflag byte, mode uint32) ([]byte, error) {
+	h, needsPath, err := ustarHeader(name, size, mtime, typeflag, mode, "")
+	if err != nil {
+		return nil, err
+	}
+	if needsPath {
+		return nil, fmt.Errorf("name too long for ustar: %s", name)
+	}
 	return h, nil
+}
+
+// writePaxExt writes one pax extended header ('x') carrying the given records.
+// The header's own name is "PaxHeader/<basename>" truncated to the ustar name
+// field, as in z-scp; it is not extracted and its name does not matter.
+func writePaxExt(w io.Writer, arcName string, records []paxRecord, mtime int64, mode uint32) error {
+	var xdata strings.Builder
+	for _, r := range records {
+		xdata.WriteString(paxXhdrRecord(r.key, r.val))
+	}
+	xname := "PaxHeader/" + path.Base(arcName)
+	if len(xname) > 100 {
+		xname = xname[:100]
+	}
+	hdr, err := paxHeader(xname, int64(xdata.Len()), mtime, 'x', mode)
+	if err != nil {
+		return err
+	}
+	if _, err := w.Write(hdr); err != nil {
+		return err
+	}
+	if _, err := io.WriteString(w, xdata.String()); err != nil {
+		return err
+	}
+	return writePadding(w, int64(xdata.Len()))
 }
 
 func writePadding(w io.Writer, n int64) error {
@@ -224,18 +309,8 @@ func writeArchiveFile(w io.Writer, localPath, arcName string, zosTag bool) error
 	mtime := time.Now().Unix()
 
 	if zosTag {
-		xdata := paxXhdrRecord("ZOS.taginfo", "0 65535")
-		xh, err := paxHeader("PaxHeader/"+path.Base(arcName), int64(len(xdata)), mtime, 'x', 0600)
-		if err != nil {
-			return err
-		}
-		if _, err := w.Write(xh); err != nil {
-			return err
-		}
-		if _, err := io.WriteString(w, xdata); err != nil {
-			return err
-		}
-		if err := writePadding(w, int64(len(xdata))); err != nil {
+		records := []paxRecord{{"ZOS.taginfo", "0 65535"}}
+		if err := writePaxExt(w, arcName, records, mtime, 0600); err != nil {
 			return err
 		}
 	}

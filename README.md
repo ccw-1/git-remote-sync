@@ -23,6 +23,7 @@ This tool maintains the exact state of your local repository on the remote, incl
 - **Flexible configuration** - Configure via git config properties (`remote-sync.*`), config file (`._remote_sync`), or command-line flags
 - **Built-in MCP Server** - Model Context Protocol server (`git-remote-sync-mcp` or `-mcp`) for seamless AI agent/harness integration
 - **Air-gap ready** - The remote never contacts origin; missing commits are shipped as git bundles over SSH (v1.6.0+)
+- **Self-seeding remotes** - A missing remote directory is created and filled with a shadow copy of the local repository, because the remote cannot clone (v1.7.0+)
 - **Three directions** - `l2r` (local to remote), `r2l` (remote to local) and `merge` (both ways, by history and timestamp) (v1.6.0+)
 - **Commit-level sync** - Ensures remote is at the same commit as local using direct ref updates
 - **Symlink sync** - Explicitly recreates git-tracked symlinks on the remote (v1.4.4+)
@@ -163,9 +164,9 @@ git remote-sync -direction merge -v  # options work the same way
 
 The utility will:
 1. Read configuration from file and/or command-line flags
-2. Verify SSH connectivity
-3. Run remote-setup commands (if configured)
-4. Probe the remote (z/OS or other POSIX, location of the native tools)
+2. Verify SSH connectivity and probe the remote (z/OS or other POSIX, location of the native tools)
+3. Create a missing remote directory and copy the local repository into it (v1.7.0+, `l2r` and `merge`)
+4. Run remote-setup commands (if configured)
 5. Ship missing commits as a git bundle over SSH and move the target HEAD
 6. Revert remote-only changes (files modified on remote but clean locally, v1.4.5+)
 7. Recreate git-tracked symlinks on the remote (v1.4.4+)
@@ -185,6 +186,7 @@ git-remote-sync -remote-path string    # Remote path (user@host:/path)
 git-remote-sync -remote-setup string   # Remote setup command
 git-remote-sync -direction l2r|r2l|merge   # Sync direction (default l2r)
 git-remote-sync -no-mux        # do not share one SSH connection between the remote commands
+git-remote-sync -no-seed       # fail when the remote directory is missing (no shadow copy)
 git-remote-sync -force          # l2r/r2l: allow overwriting a non fast-forward target branch
 ```
 
@@ -261,7 +263,7 @@ Launch command: `git-remote-sync-mcp` (or `git-remote-sync -mcp`) with standard 
 **Version Information:**
 ```bash
 $ git-remote-sync --version
-git-remote-sync version 1.5.0
+git-remote-sync version 1.7.0
 ```
 
 ### Usage Examples
@@ -326,6 +328,41 @@ located in `/bin` or `/usr/bin` and always called by their fully qualified path,
 because the PATH set up by the remote-setup command often prefers other versions
 (zopen). `git` itself is resolved from PATH. Any other system is treated as plain
 POSIX: `tar` and `cat` from PATH are used and no tool paths are fixed.
+The probe runs before the remote-setup command and before changing into the
+repository, so it also works while the remote directory still has to be created.
+
+### Creating a Missing Remote Repository (Shadow Seed)
+
+A remote that cannot clone starts empty. When the configured remote directory does
+not exist, `l2r` and `merge` create it and stream the whole local
+repository, working tree and `.git`, into it as one archive. The archive is
+extracted into a sibling directory that is renamed into place when complete, so
+an interrupted seed never leaves a half-filled repository behind:
+
+```bash
+# z/OS (path.grs-seed-<pid> is the sibling directory)
+ssh user@host 'mkdir -p <parent> && mkdir <path>.grs-seed-<pid>'
+<archive> | ssh user@host 'cd <path>.grs-seed-<pid> && _BPXK_AUTOCVT=ON /bin/pax -r -x pax -p p'
+ssh user@host 'mv <path>.grs-seed-<pid> <path>'
+# other POSIX: same, with tar -xf - instead of pax
+```
+
+Regular files, directories and symbolic links are sent with their modes and
+mtimes. Files that hold transient git state (`.git/*.lock`, merge, rebase,
+bisect and cherry-pick state, `.git/gc.pid`, git worktree metadata) and the local
+`._remote_sync` are left out, so the remote copy is a clean repository snapshot.
+If the extraction fails, the sibling directory is removed again, so the next run
+seeds instead of syncing into a broken tree.
+
+On z/OS every regular file gets a `ZOS.taginfo` extended header, as in z-scp's
+recursive upload: text files (no NUL bytes, valid UTF-8 or printable Latin-1 in
+the first 64 KiB) are tagged ISO8859-1 (`1 819`, content bytes unchanged), all
+other files are tagged binary (`0 65535`). The bytes are identical to the local
+ones, so the copied `.git/index` still agrees with the copied working tree and
+the first sync has nothing to transfer.
+
+`r2l` never creates the remote directory: there is nothing to pull from.
+`-no-seed` turns the automatic creation off.
 
 ### Commits Without Origin
 
@@ -346,9 +383,10 @@ tar -cf - files | ssh user@host 'cd /path && tar -xf -'
 ### For z/OS Remote Systems
 
 Files and bundles go through `pax` with the `_BPXK_AUTOCVT=ON` handling used by
-[z-scp](../z-scp): the archive carries a `ZOS.taginfo` header (binary, `0 65535`)
-and the EBCDIC/ASCII translation done by AUTOCVT on the SSH stream is compensated
-locally, so the bytes arrive unchanged. Downloads translate back and convert files
+[z-scp](../z-scp): each regular file in the archive carries a `ZOS.taginfo` header
+(text `1 819`, everything else `0 65535` binary) and the EBCDIC/ASCII translation
+done by AUTOCVT on the SSH stream is compensated locally, so the bytes arrive
+unchanged. Downloads translate back and convert files
 tagged as IBM-1047 text to ISO-8859-1:
 ```bash
 # upload  (local: ASCII->EBCDIC table applied to the archive)
@@ -459,10 +497,14 @@ Run with `-v` to see the probe result and every remote command.
 
 ### Remote Path Not Found
 
-Ensure the remote path exists and is a git repository:
-```bash
-ssh user@remote 'test -d /path/to/repo/.git && echo OK'
-```
+The remote directory is created automatically for `l2r` (the default) and
+`merge`: the whole local repository, `.git` included, is streamed to the
+remote as one pax (z/OS) or tar (other POSIX) archive. This is the normal way
+to bootstrap a remote that cannot clone from anywhere. Use `-no-seed` when the
+path is only a typo and you want an error instead of a copy. `r2l` never creates
+the remote directory, because there would be nothing to pull from.
+
+Run with `-v` to see the mkdir, archive and extraction commands.
 
 ## Configuration Reference
 
@@ -498,7 +540,9 @@ Lines starting with `#` are treated as comments and ignored.
 ## Limitations
 
 - Requires SSH access to remote
-- Remote must have git, and pax (z/OS) or tar (other POSIX systems); the remote repository must already be initialised (`git init`)
+- Remote must have git, and pax (z/OS) or tar (other POSIX systems); the remote repository does not need to exist (`l2r` and `merge` create it from the local copy)
+- The shadow copy sends everything below the local repository root, including ignored files; local git state of an operation in progress (merge, rebase, bisect, lock files) and `._remote_sync` are left out
+- A local repository that borrows objects from another one (`objects/info/alternates`) cannot be seeded; the copy would not be self-contained
 - `r2l` and `l2r` overwrite the target working tree (and, with `-force`, its branch); `merge` relies on comparable clocks
 - Large repositories may take time to sync initially
 - Does not handle git submodules specially

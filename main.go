@@ -15,7 +15,7 @@ import (
 
 const (
 	remoteSyncFile = "._remote_sync"
-	version        = "1.6.0"
+	version        = "1.7.0"
 )
 
 var verbose bool
@@ -52,6 +52,7 @@ func main() {
 	remoteSetup := flag.String("remote-setup", "", "Remote setup command (overrides config file)")
 	noMux := flag.Bool("no-mux", false, "Do not share one SSH connection between the remote commands")
 	forceFlag := flag.Bool("force", false, "Allow l2r/r2l to overwrite a target branch that is not a fast-forward (old tip is saved)")
+	noSeed := flag.Bool("no-seed", false, "Fail instead of creating a missing remote directory from the local repository")
 	directionFlag := flag.String("direction", "l2r", "Sync direction: l2r (local to remote), r2l (remote to local), merge")
 	showHelp := flag.Bool("h", false, "Show help message")
 	showVersion := flag.Bool("version", false, "Show version information")
@@ -125,21 +126,24 @@ func main() {
 		startMux(remote)
 	}
 
-	// Verify remote accessibility
-	if err := verifyRemote(remote); err != nil {
-		fatal("Cannot access remote: %v", err)
-	}
+	stats := &SyncStats{}
+	startTime := time.Now()
 
-	// Detect z/OS and locate the remote tools (fully qualified paths)
+	// Detect z/OS and locate the remote tools (fully qualified paths). The
+	// probe does not run the remote setup command or change into the remote
+	// repository, so it also works before that directory exists.
 	if err := probeRemote(remote); err != nil {
 		fatal("Cannot probe remote: %v", err)
 	}
 
-	fmt.Println("\nStarting sync...")
-	stats := &SyncStats{}
-	startTime := time.Now()
+	// Verify remote accessibility. A missing remote directory is created as a
+	// shadow copy of this repository (l2r and merge), because the remote can no
+	// longer clone from anywhere.
+	if err := verifyRemote(gitRoot, remote, direction, !*noSeed, stats); err != nil {
+		fatal("Cannot access remote: %v", err)
+	}
 
-	// Sync the repository
+	fmt.Println("\nStarting sync...")
 	switch direction {
 	case dirLocalToRemote:
 		err = syncRepository(gitRoot, remote, branch, stats)
@@ -208,6 +212,8 @@ Options:
   -force                 l2r/r2l: overwrite a target branch that is not a fast-forward
                          (the old tip is saved under refs/remote-sync/previous/<sha>)
   -no-mux                Do not share one SSH connection between the remote commands
+  -no-seed               Fail when the remote directory does not exist instead of
+                         copying this repository there (l2r/merge seed by default)
   -mcp                   Run as Model Context Protocol (MCP) server over stdio
   -v                     Verbose mode - show all git commands (prefixed with L: or R:)
   -remote-path string    Remote path in format [user@]host[:path] (overrides config file/git config)
@@ -236,6 +242,11 @@ Examples:
 
 The utility handles EBCDIC/ASCII conversion for z/OS systems automatically
 using iconv (codepage 1047 to 819).
+
+When the remote repository directory does not exist, l2r and merge create it
+and copy this repository there (working tree and .git) as one pax (z/OS, files
+tagged ISO8859-1 or binary) or tar (other POSIX) stream. The remote cannot
+clone from anywhere, so this one-time shadow copy is what bootstraps it.
 `, version, remoteSyncFile, remoteSyncFile)
 }
 
@@ -397,41 +408,67 @@ func getCurrentBranch() (string, error) {
 	return strings.TrimSpace(string(output)), nil
 }
 
-func verifyRemote(remote *RemoteConfig) error {
-	// Test SSH connection
-	sshTarget := getSSHTarget(remote)
-	
-	// If path is specified, verify it exists
-	if remote.Path != "" {
-		testCmd := fmt.Sprintf("test -d %s && echo OK || echo NOTFOUND", remote.Path)
-		cmd := sshCommand(sshTarget, testCmd)
-		
-		output, err := cmd.CombinedOutput()
-		if err != nil {
-			return fmt.Errorf("SSH connection failed: %w", err)
-		}
+// remotePathExists reports whether the configured remote directory exists.
+func remotePathExists(remote *RemoteConfig) (bool, error) {
+	testCmd := fmt.Sprintf("test -d %s && echo OK || echo NOTFOUND", remote.Path)
+	cmd := sshCommand(getSSHTarget(remote), testCmd)
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		return false, fmt.Errorf("SSH connection failed: %w", err)
+	}
+	switch strings.TrimSpace(string(output)) {
+	case "OK":
+		return true, nil
+	case "NOTFOUND":
+		return false, nil
+	}
+	return false, fmt.Errorf("unexpected response from remote: %s", strings.TrimSpace(string(output)))
+}
 
-		result := strings.TrimSpace(string(output))
-		if result == "NOTFOUND" {
-			return fmt.Errorf("remote path does not exist: %s", remote.Path)
-		}
-		if result != "OK" {
-			return fmt.Errorf("unexpected response from remote: %s", result)
-		}
-	} else {
-		// No path specified, just verify SSH connection works
-		cmd := sshCommand(sshTarget, "echo OK")
-		output, err := cmd.CombinedOutput()
-		if err != nil {
-			return fmt.Errorf("SSH connection failed: %w", err)
-		}
-		
-		result := strings.TrimSpace(string(output))
-		if result != "OK" {
-			return fmt.Errorf("SSH connection test failed: %s", result)
-		}
+// verifyRemote checks the SSH connection and the remote repository directory.
+// When the directory does not exist it is seeded with a shadow copy of the
+// local repository, unless seeding is disabled (the remote cannot clone, so
+// this is the only way to create a repository there).
+func verifyRemote(gitRoot string, remote *RemoteConfig, direction Direction, allowSeed bool, stats *SyncStats) error {
+	// Test SSH connection without the setup command and without changing into
+	// the repository: either may depend on files that do not exist yet.
+	sshTarget := getSSHTarget(remote)
+	output, err := sshCommand(sshTarget, "echo OK").CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("SSH connection failed: %w", err)
+	}
+	if strings.TrimSpace(string(output)) != "OK" {
+		return fmt.Errorf("SSH connection test failed: %s", strings.TrimSpace(string(output)))
 	}
 
+	if remote.Path == "" {
+		// No path configured: the SSH session starts in the repository.
+		return nil
+	}
+
+	exists, err := remotePathExists(remote)
+	if err != nil {
+		return err
+	}
+	if exists {
+		return nil
+	}
+
+	if direction == dirRemoteToLocal {
+		return fmt.Errorf("remote path does not exist: %s (use -direction l2r to create it from the local repository)", remote.Path)
+	}
+	if !allowSeed {
+		return fmt.Errorf("remote path does not exist: %s (seeding is disabled with -no-seed)", remote.Path)
+	}
+
+	fmt.Printf("Remote path does not exist: %s\n", remote.Path)
+	if err := seedRemoteRepository(gitRoot, remote, stats); err != nil {
+		return err
+	}
+
+	if exists, err := remotePathExists(remote); err != nil || !exists {
+		return fmt.Errorf("remote path still does not exist after seeding: %s", remote.Path)
+	}
 	return nil
 }
 

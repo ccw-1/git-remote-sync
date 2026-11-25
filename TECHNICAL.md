@@ -5,7 +5,7 @@
 ### Design Philosophy
 The utility is designed as a single-binary Go application that synchronizes git repository working trees between local and remote systems via SSH. It avoids using `rsync` and instead relies on `tar` over SSH (plain POSIX remotes) or `pax` with AUTOCVT handling borrowed from z-scp (z/OS remotes).
 
-**Air-gapped remotes (v1.6.0+).** The remote repositories cannot reach origin or any other network; SSH from the local machine is the only link. Nothing in the tool makes the remote contact a third party: no `git fetch`, no push to origin. Missing commits are moved as git bundles through the SSH stream, in the direction needed (`-direction l2r|r2l|merge`).
+**Air-gapped remotes (v1.6.0+).** The remote repositories cannot reach origin or any other network; SSH from the local machine is the only link. Nothing in the tool makes the remote contact a third party: no `git fetch`, no push to origin. Missing commits are moved as git bundles through the SSH stream, in the direction needed (`-direction l2r|r2l|merge`). Because the remote cannot clone either, a missing remote directory is seeded with a shadow copy of the local repository (v1.7.0+).
 
 ### Core Components
 
@@ -14,8 +14,9 @@ main()
   ├── getGitRoot()
   ├── readRemoteConfig()
   ├── getCurrentBranch()
-  ├── verifyRemote()
   ├── probeRemote()                ← transfer.go: uname, /bin|/usr/bin tool paths (z/OS only)
+  ├── verifyRemote()               ← SSH check; missing path -> seedRemoteRepository()
+  │   └── seedRemoteRepository()   ← shadow.go: whole-tree pax (z/OS) / tar (POSIX) seed
   └── syncRepository()             ← l2r;  syncRemoteToLocal() = r2l;  syncMerge() = merge (modes.go)
       ├── ensureRemoteBranch()
       ├── syncCommitsViaBundle()
@@ -320,11 +321,25 @@ Function: `ensureRemoteBranch(remote *RemoteConfig, branch string) error`
 ## Air-Gapped Operation (v1.6.0+)
 
 ### Remote probe (`transfer.go`)
-`probeRemote` runs once: `uname` decides `RemoteConfig.IsZOS` (`OS/390`). On z/OS the tools `cat rm mkdir ln pax find touch chtag iconv` are looked up in `/bin` then `/usr/bin` and stored in `RemoteConfig.Tools`; `rt(remote, "tool")` returns the fully qualified path so the zopen versions earlier on PATH are never used. `git` stays PATH-resolved. On any other system no tool paths are fixed and plain `tar` is used.
+`probeRemote` runs once: `uname` decides `RemoteConfig.IsZOS` (`OS/390`). On z/OS the tools `cat rm mkdir ln pax find touch chtag iconv` are looked up in `/bin` then `/usr/bin` and stored in `RemoteConfig.Tools`; `rt(remote, "tool")` returns the fully qualified path so the zopen versions earlier on PATH are never used. `git` stays PATH-resolved. On any other system no tool paths are fixed and plain `tar` is used. The probe runs no setup command and does not `cd` into the repository, because both may need files that do not exist before the first seed.
+
+### Shadow seed (`shadow.go`, v1.7.0+)
+Order in `main`: `probeRemote` -> `verifyRemote(gitRoot, remote, direction, allowSeed, stats)` -> sync. `verifyRemote` tests SSH with a plain `echo OK`, then `test -d <path>`. When the path is missing:
+
+- `r2l` returns an error (nothing to pull); `-no-seed` returns an error; otherwise `seedRemoteRepository` runs.
+- `mkdir -p <parent>` on the remote (fully qualified `mkdir` on z/OS) and a sibling directory `<path>.grs-seed-<pid>`; the archive is extracted there and the finished tree is `mv`ed to `<path>` (an interrupted seed leaves no half-filled repository at the target).
+- One archive is streamed to the extractor:
+  - z/OS: `cd <seed> && _BPXK_AUTOCVT=ON /bin/pax -r -x pax -p p`, archive bytes translated with `e2a` locally (AUTOCVT identity on the wire).
+  - POSIX: `cd <seed> && tar -xf -`.
+- `writeTreeArchive` walks the local repository root with `filepath.WalkDir` and streams it: directory entries (typeflag `5`), regular files (`0`), symbolic links (`2`) with modes and mtimes; sockets, fifos and devices are skipped. Names that do not fit ustar get a pax `path` record, link targets over 100 bytes a `linkpath` record. Every z/OS regular file gets a `ZOS.taginfo` extended header: `1 819` when the first 64 KiB look like text (no NUL, valid UTF-8 or printable Latin-1), else `0 65535`. Content bytes are never converted, so the copied `.git/index` and the copied working tree stay consistent and the sync that follows transfers nothing.
+- `skipSeedPath` leaves out `._remote_sync`, `.git/*.lock`, `.git/gc.pid`, `.git/gc.log`, in-progress merge/rebase/bisect/cherry-pick state (`MERGE_*`, `AUTO_MERGE`, `REBASE_HEAD`, `BISECT_*`, and the `rebase-merge`, `rebase-apply`, `sequencer`, `worktrees` directories), `.git/remote-sync.bundle` and `.git/objects/info/alternates`.
+- A failed write or extraction runs `rm -rf <seed>` before returning, so a retry seeds again instead of syncing into a partial tree. Success is checked with `test -d <path>/.git` after the rename; if `<path>` appeared during the seed the finished tree is discarded and an error is returned.
+
+The seed counts files/bytes into `SyncStats`, so the summary includes the bootstrap transfer.
 
 ### File and bundle transfer
 - **POSIX remote:** upload = a one-file ustar archive written by `writeTarFile` into `ssh host 'tar -xf -'`; download = `tar -cf -` parsed with `archive/tar` (batches of 50). `syncFileBatch` pipes the local `tar` into the remote `tar` without a local shell.
-- **z/OS remote:** AUTOCVT is on for ssh sessions: z/OS translates stdin with a2e and stdout with e2a. Upload applies the e2a table locally before ssh, download applies a2e after, so the net effect is identity (same trick as z-scp). The archive is pax with an extended header `ZOS.taginfo=0 65535` (binary tag) written by `writePaxFile` (checksums computed on the logical bytes). Downloaded entries tagged `1 1047` are converted with e2a on extraction.
+- **z/OS remote:** AUTOCVT is on for ssh sessions: z/OS translates stdin with a2e and stdout with e2a. Upload applies the e2a table locally before ssh, download applies a2e after, so the net effect is identity (same trick as z-scp). The archive is pax with an extended header `ZOS.taginfo=0 65535` (binary tag) written by `writePaxFile` (checksums computed on the logical bytes). Downloaded entries tagged `1 1047` are converted with e2a on extraction. The shadow seed uses the same wire handling, with per-file text/binary tags.
 
 ### Shipping commits (`commits.go`)
 `shipCommitsToRemote(local -> remote)` and `shipCommitsToLocal(remote -> local)`:
@@ -543,11 +558,15 @@ ssh user@host 'echo OK'
 **Solution:** Check file encoding, line endings, or permissions
 
 ### Issue: "remote path is not a git repository"
-**Cause:** Remote path doesn't exist or isn't initialized
-**Solution:**
+**Cause:** The remote path exists but holds no `.git` directory (for example an
+empty directory created by hand)
+**Solution:** Remove the directory so the next `l2r` seeds it:
 ```bash
-ssh user@host 'cd /path && git init'
+ssh user@host 'rm -rf /path'
+git-remote-sync -direction l2r
 ```
+Files that hold transient git state (merge/rebase/bisect state, `*.lock`,
+`._remote_sync`) are not part of the shadow copy.
 
 ## Performance Benchmarks
 
@@ -570,7 +589,14 @@ ssh user@host 'cd /path && git init'
 
 ## Version History
 
-### v1.6.0 (Current)
+### v1.7.0 (Current)
+- **Shadow seeding** (`shadow.go`): a missing remote directory is created for `l2r` and `merge` and filled with one pax (z/OS) or tar (other POSIX) archive of the whole local repository, working tree and `.git`. The remote cannot clone, so this bootstrap copy is the only way to get a repository there
+- z/OS: files are tagged as in z-scp's recursive upload (text `1 819`, binary `0 65535`), bytes unchanged, so the copied index and working tree agree
+- Transient git state (`*.lock`, merge/rebase/bisect/cherry-pick files, `gc.pid`, worktree metadata) and `._remote_sync` are left out; a failed extraction removes the partial directory
+- `-no-seed` disables the automatic creation; `r2l` never creates the remote directory
+- `probeRemote` now runs without the setup command and without changing into the repository, so it works before the directory exists; help text and docs updated
+
+### v1.6.0
 - **SSH connection sharing** (`mux.go`): one `ControlMaster` connection, all `sshCommand(...)` calls use `ControlPath` with `ControlMaster=no` (plain connection if the master is gone); `-no-mux` disables; closed by `stopMux` at the end and in `fatal`. pok56 no-change sync 15 s -> 3 s
 - **Fast-forward guard** and `-force`: l2r/r2l no longer silently drop target commits
 - **Air-gapped remotes** - No more `git fetch` or push to origin; commits are shipped as git bundles over SSH

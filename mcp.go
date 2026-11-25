@@ -470,6 +470,9 @@ func handleHelp(id json.RawMessage) {
 	helpText := `git-remote-sync — sync local git repository with a remote over SSH without git push.
 Designed for air-gapped z/OS systems: SSH is the only link, the remote never contacts origin.
 Commits travel as git bundles over SSH; direction l2r|r2l|merge.
+A missing remote directory is created for l2r/merge and filled with a shadow copy
+of this repository (working tree and .git) as one pax (z/OS) or tar stream; the
+remote cannot clone, so this bootstraps it. Use the CLI flag -no-seed to disable.
 
 MCP Tools:
   - git_remote_sync: Run sync on a repository (supports repo_path, remote_path, remote_setup, direction, force, verbose)
