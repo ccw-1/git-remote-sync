@@ -115,7 +115,7 @@ func probeRemote(remote *RemoteConfig) error {
 	logCommand("R", script)
 	output, err := sshCommand(getSSHTarget(remote), remoteCmd).Output()
 	if err != nil {
-		return fmt.Errorf("remote probe failed: %w", err)
+		return fmt.Errorf("remote probe failed: %w, %s", err, string(output))
 	}
 	remote.Tools = make(map[string]string)
 	sawOS := false

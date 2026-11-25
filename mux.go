@@ -4,6 +4,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 )
 
 // SSH connection multiplexing: one master connection is opened up front and
@@ -19,7 +20,9 @@ var (
 // sshCommand builds an ssh command that goes through the master connection
 // when one is up. Without it the command is a plain ssh call.
 func sshCommand(args ...string) *exec.Cmd {
-	return exec.Command("ssh", append(append([]string{}, muxArgs...), args...)...)
+	sshArgs := append(append([]string{}, muxArgs...), args...)
+	logCommand("R", "ssh "+strings.Join(sshArgs, " "))
+	return exec.Command("ssh", sshArgs...)
 }
 
 // startMux opens the master connection. Any failure leaves multiplexing off
